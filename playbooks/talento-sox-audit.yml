@@ -1,0 +1,289 @@
+---
+# talento-sox-audit.yml
+#
+# Auditoria SOX de actividad sensible en TALENTO. Disenado para que el
+# agente lo invoque cuando se pregunta sobre seguridad, accesos, acciones
+# privilegiadas o cumplimiento.
+#
+# Diferencia con los anteriores:
+#   - snapshot (48) = inventario amplio
+#   - errors-analysis (49) = foco en eventos criticos (ERROR/WARN)
+#   - sox-audit (50) = foco en ACTORES (quien hizo que): logins por usuario,
+#                      acciones privilegiadas (rol=LIDER), eventos de seguridad
+#                      a nivel BD (failed logins SQL)
+#
+# Parametros (extra_vars):
+#   time_range_hours: rango (default 24)
+#   azure_*: credenciales (mismas que snapshot)
+#   teams_webhook_url: webhook opcional para adaptive card
+#
+# Salida via set_stats:
+#   total_login_events, unique_users, total_privileged_actions,
+#   security_incidents (failed SQL logins / SQLException), audit_status
+
+- name: TALENTO SOX security audit — actores y acciones sensibles
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    time_range_hours: "{{ time_range_hours | default(24) }}"
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    workspace_id: "{{ log_analytics_workspace_id | default(lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID')) }}"
+    teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+  tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - workspace_id | length > 0
+        fail_msg: "Faltan variables azure_*."
+
+    - name: Obtener token OAuth2
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        la_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Query 1: actividad de login por usuario (success / request / failure)
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Auditoria — eventos de login por usuario
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains "login" or Message contains "Login"
+                 or Message contains "Solicitud de login"
+            | extend User = tostring(extract(@"usuario\s+'?([A-Za-z0-9._-]+)'?", 1, Message))
+            | extend Result = case(
+                Message contains "exitoso" or Message contains "Login exitoso", "SUCCESS",
+                Message contains "Solicitud de login", "REQUEST",
+                Message contains "failed" or Message contains "fallido", "FAILURE",
+                "OTHER")
+            | where User != ""
+            | summarize Count=count() by User, Result
+            | order by Count desc
+            | top 20 by Count desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: logins_query
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Query 2: acciones privilegiadas (rol explicito o acciones admin)
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Auditoria — acciones privilegiadas (rol=LIDER, aprobaciones)
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains "rol=" or Message contains "Intentando aprobar"
+                 or Message contains "Intentando denegar" or Message contains "Listando todas"
+            | extend Role = tostring(extract(@"rol=([A-Z_]+)", 1, Message))
+            | extend ActionType = case(
+                Message contains "Intentando aprobar", "APROBAR",
+                Message contains "Intentando denegar", "DENEGAR",
+                Message contains "Listando todas",    "CONSULTA_MASIVA",
+                "OTRA")
+            | summarize Count=count() by ActionType, Role
+            | order by Count desc
+            | top 20 by Count desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: privileged_query
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Query 3: incidentes de seguridad a nivel BD (failed logins SQL)
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Auditoria — incidentes de seguridad BD (failed logins SQL, exceptions)
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains "Login failed for user"
+                 or Message contains "SQLServerException"
+                 or Message contains "Authentication failed"
+            | extend Snippet = substring(Message, 0, 200)
+            | summarize Count=count() by Snippet
+            | top 10 by Count desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: security_query
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Procesar metricas y calcular status
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Extraer metricas de auditoria
+      ansible.builtin.set_fact:
+        login_rows: "{{ logins_query.json.tables[0].rows | default([]) }}"
+        privileged_rows: "{{ privileged_query.json.tables[0].rows | default([]) }}"
+        security_rows: "{{ security_query.json.tables[0].rows | default([]) }}"
+
+    - name: Computar totales
+      ansible.builtin.set_fact:
+        total_login_events: "{{ login_rows | map(attribute=2) | map('int') | sum }}"
+        unique_users: "{{ login_rows | map(attribute=0) | unique | list | length }}"
+        total_privileged_actions: "{{ privileged_rows | map(attribute=2) | map('int') | sum }}"
+        total_security_incidents: "{{ security_rows | map(attribute=1) | map('int') | sum }}"
+
+    - name: Clasificar audit_status global
+      ansible.builtin.set_fact:
+        audit_status: >-
+          {{ 'SECURITY_INCIDENT' if total_security_incidents | int > 0
+             else ('AUDIT_REVIEW' if total_privileged_actions | int > 5 else 'NORMAL') }}
+        card_color: >-
+          {{ 'attention' if total_security_incidents | int > 0
+             else ('warning' if total_privileged_actions | int > 5 else 'good') }}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Salida estructurada
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Exportar resultados via set_stats
+      ansible.builtin.set_stats:
+        data:
+          time_range_hours: "{{ time_range_hours }}"
+          audit_status: "{{ audit_status }}"
+          total_login_events: "{{ total_login_events }}"
+          unique_users: "{{ unique_users }}"
+          total_privileged_actions: "{{ total_privileged_actions }}"
+          total_security_incidents: "{{ total_security_incidents }}"
+          login_breakdown: "{{ login_rows }}"
+          privileged_breakdown: "{{ privileged_rows }}"
+          security_incidents: "{{ security_rows }}"
+        per_host: false
+
+    - name: Resumen stdout
+      ansible.builtin.debug:
+        msg:
+          - "=== TALENTO SOX SECURITY AUDIT ==="
+          - "Rango: {{ time_range_hours }}h"
+          - "audit_status: {{ audit_status }}"
+          - "Login events: {{ total_login_events }} ({{ unique_users }} usuarios unicos)"
+          - "Acciones privilegiadas: {{ total_privileged_actions }}"
+          - "Incidentes de seguridad: {{ total_security_incidents }}"
+          - "Logins detail: {{ login_rows }}"
+          - "Acciones detail: {{ privileged_rows }}"
+          - "Incidentes detail: {{ security_rows }}"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Notificar via adaptive card en Teams
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ card_color }}"
+                    items:
+                      - type: TextBlock
+                        text: "🔐 TALENTO SOX Security Audit"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "Estado: {{ audit_status }} | Rango: últimas {{ time_range_hours }}h | TALENTO es SOX-regulado"
+                        isSubtle: true
+                        spacing: None
+                  - type: FactSet
+                    facts:
+                      - title: "Eventos de login"
+                        value: "{{ total_login_events }}"
+                      - title: "Usuarios únicos"
+                        value: "{{ unique_users }}"
+                      - title: "Acciones privilegiadas"
+                        value: "{{ total_privileged_actions }}"
+                      - title: "Incidentes seguridad BD"
+                        value: "{{ total_security_incidents }}"
+                  - type: TextBlock
+                    text: "Actividad de logins por usuario"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in login_rows %}• **{{ row[0] }}** ({{ row[1] }}): {{ row[2] }} eventos\n{% endfor %}{% if (login_rows | length) == 0 %}_Sin eventos de login en el rango._{% endif %}"
+                    wrap: true
+                  - type: TextBlock
+                    text: "Acciones privilegiadas"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in privileged_rows %}• **{{ row[0] }}** (rol: {{ row[1] | default('—') }}): {{ row[2] }} veces\n{% endfor %}{% if (privileged_rows | length) == 0 %}_Sin acciones privilegiadas en el rango._{% endif %}"
+                    wrap: true
+                  - type: TextBlock
+                    text: "Incidentes de seguridad BD (TOP 10)"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in security_rows %}• **{{ row[1] }}×** — {{ row[0] | truncate(150, true, '…') | replace('\n',' ') }}\n\n{% endfor %}{% if (security_rows | length) == 0 %}_Sin incidentes de seguridad detectados._{% endif %}"
+                    wrap: true
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_webhook_url | length > 0
+      register: teams_notification
+      failed_when: false
+
+    - name: Reportar resultado notificación Teams
+      ansible.builtin.debug:
+        msg: >-
+          {% if teams_webhook_url | length == 0 %}
+          Teams webhook no configurado — skip.
+          {% elif teams_notification.status | default(0) in [200, 202] %}
+          ✓ Adaptive card SOX enviada (HTTP {{ teams_notification.status }}).
+          {% else %}
+          ⚠ Fallo notificación Teams (status {{ teams_notification.status | default('?') }}).
+          {% endif %}
