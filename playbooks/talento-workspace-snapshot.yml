@@ -21,11 +21,12 @@
   gather_facts: false
 
   vars:
+    # extra_vars desde launch tienen precedencia, fallback a env vars (uso local)
     time_range_hours: "{{ time_range_hours | default(24) }}"
-    tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
-    client_id: "{{ lookup('env', 'AZURE_CLIENT_ID') }}"
-    client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') }}"
-    workspace_id: "{{ lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID') }}"
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    workspace_id: "{{ log_analytics_workspace_id | default(lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID')) }}"
 
   tasks:
     - name: Validar variables requeridas
