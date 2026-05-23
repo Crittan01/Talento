@@ -51,8 +51,9 @@ puede:
 | L0  | Modelo desplegado, agente con instrucciones, responde texto | ✅ Hecho |
 | L1  | Agente con custom function tool, ciclo completo a Log Analytics | ✅ Hecho |
 | L2.0 | Segunda tool: AWX como ejecutor (smoke test hello-world) | ✅ Hecho |
-| L2.1 | Playbook real: snapshot del workspace (no invasivo, archivado en AWX) | ⏳ Necesita repo Git |
-| L2.2 | Playbook real: restart container + adaptive card Teams | ⏳ Necesita SP perms + webhook |
+| L2.1 | Playbook real: snapshot del workspace (no invasivo, archivado en AWX) | ✅ Hecho |
+| L2.2 | Adaptive Card a Teams con resumen del snapshot | ✅ Hecho |
+| L2.3 | Acción invasiva real: restart container | ⏳ Necesita SP perms en Azure |
 | L3  | Disparador automático: alerta de App Insights → conversación | ⏳ Después |
 
 ## Cómo correrlo (WSL Oracle Linux 9)
