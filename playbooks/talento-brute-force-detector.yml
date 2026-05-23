@@ -1,0 +1,248 @@
+---
+# talento-brute-force-detector.yml
+#
+# Detector enfocado de intentos de brute force en TALENTO.
+#
+# Diferencia con sox-audit:
+#   - sox-audit (JT 50): auditoria amplia (logins + acciones + incidentes BD)
+#   - brute-force-detector (JT 51): FOCO en patrones de failed login por
+#                                   usuario en ventana corta, con umbral
+#
+# Heuristica:
+#   - Cuenta intentos fallidos por usuario en `time_range_hours`
+#   - Si algun usuario supera `failed_threshold` → SECURITY_INCIDENT
+#   - Considera tambien failed logins de BD (sqlserver-ecopetrol-admin)
+#
+# Parametros (extra_vars):
+#   time_range_hours: rango analisis (default 24)
+#   failed_threshold: umbral de failed logins por usuario para marcar
+#                     sospechoso (default 5)
+#   azure_*: credenciales (inyectadas por el bridge)
+#   teams_webhook_url: webhook opcional para adaptive card
+#
+# Salida via set_stats:
+#   time_range_hours, failed_threshold, bruteforce_severity
+#   (HIGH/MEDIUM/LOW), suspicious_users_count, suspicious_users (list),
+#   total_failed_logins, top_messages
+
+- name: TALENTO brute-force detector — failed logins agrupados por usuario
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    time_range_hours: "{{ time_range_hours | default(24) }}"
+    failed_threshold: "{{ failed_threshold | default(5) }}"
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    workspace_id: "{{ log_analytics_workspace_id | default(lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID')) }}"
+    teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+  tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - workspace_id | length > 0
+        fail_msg: "Faltan azure_* vars."
+
+    - name: Obtener token OAuth2
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        la_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Query 1: failed logins por usuario (heuristica del log Spring Boot)
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Detectar failed logins agrupados por usuario
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains "login" or Message contains "Login"
+                 or Message contains "failed" or Message contains "fallido"
+                 or Message contains "Authentication failed"
+            | extend User = tostring(extract(@"usuario\s+'?([A-Za-z0-9._-]+)'?", 1, Message))
+            | extend IsFailure = case(
+                Message contains "failed" or Message contains "fallido"
+                  or Message contains "Authentication failed", true,
+                false)
+            | where IsFailure and User != ""
+            | summarize FailedCount=count() by User
+            | order by FailedCount desc
+            | top 20 by FailedCount desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: failed_users_query
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Query 2: failed logins de BD (SQL Server)
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Detectar failed logins de BD (SQL Server)
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains "Login failed for user"
+            | extend Snippet = substring(Message, 0, 200)
+            | summarize Count=count() by Snippet
+            | top 5 by Count desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: db_failed_query
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Procesar y clasificar severidad
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Procesar filas
+      ansible.builtin.set_fact:
+        suspicious_users: "{{ failed_users_query.json.tables[0].rows | default([]) }}"
+        db_failed_rows: "{{ db_failed_query.json.tables[0].rows | default([]) }}"
+
+    - name: Filtrar usuarios sobre umbral
+      ansible.builtin.set_fact:
+        users_over_threshold: "{{ suspicious_users | selectattr(1, 'ge', (failed_threshold | int)) | list }}"
+        total_failed_logins: "{{ suspicious_users | map(attribute=1) | map('int') | sum }}"
+        total_db_failed: "{{ db_failed_rows | map(attribute=1) | map('int') | sum }}"
+
+    - name: Clasificar severidad
+      ansible.builtin.set_fact:
+        bruteforce_severity: >-
+          {{ 'HIGH' if (users_over_threshold | length > 0) or (total_db_failed | int > 10)
+             else ('MEDIUM' if (total_failed_logins | int > 0) or (total_db_failed | int > 0)
+             else 'LOW') }}
+        card_color: >-
+          {{ 'attention' if (users_over_threshold | length > 0) or (total_db_failed | int > 10)
+             else ('warning' if (total_failed_logins | int > 0) or (total_db_failed | int > 0)
+             else 'good') }}
+
+    - name: Exportar resultados via set_stats
+      ansible.builtin.set_stats:
+        data:
+          time_range_hours: "{{ time_range_hours }}"
+          failed_threshold: "{{ failed_threshold }}"
+          bruteforce_severity: "{{ bruteforce_severity }}"
+          suspicious_users_count: "{{ users_over_threshold | length }}"
+          suspicious_users: "{{ suspicious_users }}"
+          total_failed_logins: "{{ total_failed_logins }}"
+          total_db_failed: "{{ total_db_failed }}"
+          top_messages: "{{ db_failed_rows }}"
+        per_host: false
+
+    - name: Resumen stdout
+      ansible.builtin.debug:
+        msg:
+          - "=== TALENTO BRUTE-FORCE DETECTOR ==="
+          - "Rango: {{ time_range_hours }}h | Umbral: {{ failed_threshold }} intentos"
+          - "Severidad: {{ bruteforce_severity }}"
+          - "Usuarios sobre umbral: {{ users_over_threshold | length }}"
+          - "Total failed app logins: {{ total_failed_logins }}"
+          - "Total failed BD logins: {{ total_db_failed }}"
+          - "Usuarios sospechosos detalle: {{ suspicious_users }}"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Adaptive card a Teams
+    # ─────────────────────────────────────────────────────────────────────
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ card_color }}"
+                    items:
+                      - type: TextBlock
+                        text: "{{ '🚨' if bruteforce_severity == 'HIGH' else ('⚠️' if bruteforce_severity == 'MEDIUM' else '🛡️') }} TALENTO Brute Force Detector"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "Severidad: {{ bruteforce_severity }} | Rango: {{ time_range_hours }}h | Umbral: {{ failed_threshold }} intentos"
+                        isSubtle: true
+                        spacing: None
+                  - type: FactSet
+                    facts:
+                      - title: "Usuarios sobre umbral"
+                        value: "{{ users_over_threshold | length }}"
+                      - title: "Failed app logins"
+                        value: "{{ total_failed_logins }}"
+                      - title: "Failed BD logins"
+                        value: "{{ total_db_failed }}"
+                      - title: "Total alertas"
+                        value: "{{ (total_failed_logins | int) + (total_db_failed | int) }}"
+                  - type: TextBlock
+                    text: "Usuarios con intentos fallidos (top 10)"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in suspicious_users[:10] %}• **{{ row[0] }}**: {{ row[1] }} intentos\n{% endfor %}{% if (suspicious_users | length) == 0 %}_Sin intentos fallidos detectados a nivel app._{% endif %}"
+                    wrap: true
+                  - type: TextBlock
+                    text: "Incidentes BD (failed SQL logins)"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in db_failed_rows %}• **{{ row[1] }}×** — {{ row[0] | truncate(140, true, '…') | replace('\n',' ') }}\n\n{% endfor %}{% if (db_failed_rows | length) == 0 %}_Sin failed logins SQL._{% endif %}"
+                    wrap: true
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_webhook_url | length > 0
+      register: teams_notification
+      failed_when: false
+
+    - name: Reportar resultado notificación Teams
+      ansible.builtin.debug:
+        msg: >-
+          {% if teams_webhook_url | length == 0 %}
+          Teams webhook no configurado — skip.
+          {% elif teams_notification.status | default(0) in [200, 202] %}
+          ✓ Adaptive card Brute Force enviada (HTTP {{ teams_notification.status }}).
+          {% else %}
+          ⚠ Fallo notificación Teams (status {{ teams_notification.status | default('?') }}).
+          {% endif %}
