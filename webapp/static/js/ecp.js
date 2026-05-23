@@ -38,7 +38,6 @@
     modalCancelX: document.getElementById('freeTextCancel'),
     filterTimeRange: document.getElementById('filterTimeRange'),
     filterThreshold: document.getElementById('filterThreshold'),
-    filterThresholdGroup: document.getElementById('filterThresholdGroup'),
     filterHint: document.getElementById('filterHint'),
     connStatus: document.getElementById('connStatus'),
   };
@@ -55,10 +54,10 @@
   function updateFilterHint() {
     const f = readFilters();
     el.filterHint.textContent =
-      `Filtros activos: ${f.time_range_hours}h` +
-      (el.filterThresholdGroup.hidden ? '' : ` · umbral ${f.failed_threshold}`);
+      `Filtro global: ${f.time_range_hours}h. Umbral brute-force: ${f.failed_threshold} (configurable en la card).`;
   }
   [el.filterTimeRange, el.filterThreshold].forEach(s => {
+    if (!s) return;
     s.addEventListener('change', () => {
       markCardsAsUsingFilters();
       updateFilterHint();
@@ -112,10 +111,25 @@
   // -------------------------------------------------------------------------
   // Card click handler
   // -------------------------------------------------------------------------
+  // Stop propagation en cualquier control de filtro inline dentro de las cards
+  // (evita que click en el dropdown de umbral dispare el escenario)
+  el.cards.addEventListener('click', (e) => {
+    if (e.target.closest('[data-stop-click="true"]')) {
+      e.stopPropagation();
+      return;
+    }
+  }, true);
+  // Bloquear tambien el change para el caso del select (dispara click en parent)
+  el.cards.addEventListener('change', (e) => {
+    if (e.target.closest('[data-stop-click="true"]')) e.stopPropagation();
+  }, true);
+
   el.cards.addEventListener('click', (e) => {
     const card = e.target.closest('.ecp-sidebar-card');
     if (!card) return;
     if (card.classList.contains('is-running')) return; // ya activa
+    // Evitar trigger si el click fue dentro del filtro inline
+    if (e.target.closest('[data-stop-click="true"]')) return;
 
     const sid = card.dataset.scenarioId;
     const renderer = card.dataset.renderer;
@@ -314,7 +328,7 @@
       appendTimeline('error', '⚠️', `Límite de ${evt.max_hops} hops alcanzado.`);
     }
     else if (t === 'agent.final') {
-      appendTimeline('final', '🤖', `Síntesis final lista (${evt.elapsed_seconds}s total).`);
+      appendTimeline('final', '🦎', `Síntesis final lista (${evt.elapsed_seconds}s total).`);
       renderResult(evt.text);
     }
     else if (t === 'agent.error') {
@@ -379,7 +393,10 @@
     }
     el.result.innerHTML = resultHtml + `
       <div class="ecp-agent-reply">
-        <div class="ecp-agent-reply__header">🤖 RESPUESTA DEL AGENTE</div>
+        <div class="ecp-agent-reply__header">
+          <img src="/static/img/iguana.svg" alt="Iguana" class="ecp-iguana ecp-iguana--sm">
+          RESPUESTA DEL AGENTE
+        </div>
         ${agentHtml}
       </div>
     `;

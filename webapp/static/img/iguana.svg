@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Iguana mascota — TALENTO Operations Console
+  Colores oficiales Ecopetrol: #CCD32A (lima 382C), #004236 (verde institucional 3308C),
+  acentos en tonos lima oscuros.
+  Diseno estilizado, perfil lateral, friendly. Funciona en 24-100px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 90" role="img" aria-label="Iguana — agente TALENTO">
+  <defs>
+    <linearGradient id="iguanaBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#CCD32A"/>
+      <stop offset="100%" stop-color="#A8B028"/>
+    </linearGradient>
+    <linearGradient id="iguanaSpikes" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#A8B028"/>
+      <stop offset="100%" stop-color="#7A8A1F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Sombra suave bajo el cuerpo -->
+  <ellipse cx="65" cy="84" rx="48" ry="3" fill="#004236" opacity="0.15"/>
+
+  <!-- Cola enroscada -->
+  <path d="M 102 55 Q 122 55 122 70 Q 121 80 110 78 Q 108 70 96 64 Z"
+        fill="url(#iguanaBody)"/>
+
+  <!-- Pata trasera -->
+  <ellipse cx="86" cy="74" rx="4.5" ry="7" fill="#A8B028"/>
+
+  <!-- Cuerpo principal -->
+  <path d="M 24 56
+           Q 26 36 50 33
+           Q 80 31 102 44
+           Q 110 56 100 66
+           Q 80 73 50 70
+           Q 28 66 24 56 Z"
+        fill="url(#iguanaBody)"/>
+
+  <!-- Spikes (cresta dorsal) -->
+  <path d="M 38 38 L 41 28 L 44 38 Z" fill="url(#iguanaSpikes)"/>
+  <path d="M 50 34 L 53 23 L 56 34 Z" fill="url(#iguanaSpikes)"/>
+  <path d="M 62 32 L 65 21 L 68 32 Z" fill="url(#iguanaSpikes)"/>
+  <path d="M 74 33 L 77 24 L 80 33 Z" fill="url(#iguanaSpikes)"/>
+  <path d="M 86 37 L 88 30 L 90 37 Z" fill="url(#iguanaSpikes)"/>
+
+  <!-- Pata delantera -->
+  <ellipse cx="42" cy="74" rx="4.5" ry="7" fill="#A8B028"/>
+
+  <!-- Cabeza -->
+  <path d="M 6 52
+           Q 6 42 16 40
+           Q 32 38 38 50
+           Q 35 60 18 60
+           Q 6 60 6 52 Z"
+        fill="url(#iguanaBody)"/>
+
+  <!-- Ojo -->
+  <circle cx="14" cy="48" r="3.2" fill="#FFFFFF"/>
+  <circle cx="13.5" cy="48" r="1.8" fill="#004236"/>
+  <circle cx="12.8" cy="47.2" r="0.6" fill="#FFFFFF"/>
+
+  <!-- Sonrisa sutil -->
+  <path d="M 7 56 Q 11 58 16 56"
+        fill="none" stroke="#004236" stroke-width="1.1"
+        stroke-linecap="round"/>
+
+  <!-- Dewlap (papada) -->
+  <path d="M 14 58 Q 18 68 28 62 Q 22 60 14 58 Z" fill="#A8B028"/>
+
+  <!-- Brillo en la espalda (highlight) -->
+  <path d="M 32 46 Q 60 42 88 48"
+        fill="none" stroke="#E8EE60" stroke-width="1.5"
+        stroke-linecap="round" opacity="0.5"/>
+</svg>

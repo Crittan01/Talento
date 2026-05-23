@@ -201,6 +201,42 @@ body {
   font-weight: 700;
 }
 
+/* Filtro inline dentro de la card brute-force */
+.ecp-sidebar-card__inline-filter {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.ecp-sidebar-card__inline-filter label {
+  font-weight: 700;
+  color: var(--ecp-dark-teal);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ecp-sidebar-card__inline-filter select {
+  font-family: Verdana, sans-serif;
+  font-size: 11px;
+  padding: 3px 20px 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ecp-dark-teal);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='%23004236'%3E%3Cpath d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  background-size: 8px;
+}
+.ecp-sidebar-card__inline-filter select:focus {
+  outline: none;
+  border-color: var(--ecp-yellow);
+}
+
 /* Spinner del sidebar card */
 .ecp-sidebar-card__spinner {
   position: absolute;
@@ -241,10 +277,17 @@ body {
   flex: 1;
 }
 .ecp-welcome__icon {
-  font-size: 64px;
   margin-bottom: 12px;
   animation: float 2.5s ease-in-out infinite;
+  display: inline-block;
 }
+
+/* ===== Iguana SVG mascota (reemplaza emoji 🤖) ===== */
+.ecp-iguana { display: inline-block; vertical-align: middle; }
+.ecp-iguana--sm { width: 22px; height: auto; }
+.ecp-iguana--md { width: 36px; height: auto; }
+.ecp-iguana--lg { width: 64px; height: auto; }
+.ecp-iguana--xl { width: 110px; height: auto; }
 .ecp-welcome__title {
   font-size: 28px;
   font-weight: 700;
@@ -295,7 +338,12 @@ body {
   flex: 1;
   min-width: 0;
 }
-.ecp-runbanner__icon { font-size: 24px; }
+.ecp-runbanner__icon {
+  font-size: 24px;
+  display: inline-flex;
+  align-items: center;
+}
+.ecp-runbanner__icon img { height: 32px; width: auto; }
 .ecp-runbanner__title {
   margin: 0;
   font-size: 16px;
@@ -505,6 +553,9 @@ body {
   margin-bottom: 12px;
   padding-bottom: 8px;
   border-bottom: 1px solid rgba(204, 211, 42, 0.3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* Tipografía del markdown rendered (marked.js) */

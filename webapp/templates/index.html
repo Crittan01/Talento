@@ -31,7 +31,7 @@
     {% endif %}
   </div>
 
-  <!-- ============ Filter bar ============ -->
+  <!-- ============ Filter bar (solo filtros globales) ============ -->
   <div class="ecp-filterbar" id="filterbar">
     <div class="ecp-filterbar__group">
       <label for="filterTimeRange" class="ecp-filterbar__label">⏱️ Analizar últimas:</label>
@@ -44,17 +44,9 @@
         <option value="168">7 días</option>
       </select>
     </div>
-    <div class="ecp-filterbar__group" id="filterThresholdGroup">
-      <label for="filterThreshold" class="ecp-filterbar__label">🛡️ Umbral brute-force:</label>
-      <select id="filterThreshold" class="ecp-filterbar__select">
-        <option value="3">3 intentos</option>
-        <option value="5" selected>5 intentos</option>
-        <option value="10">10 intentos</option>
-        <option value="20">20 intentos</option>
-      </select>
-    </div>
     <div class="ecp-filterbar__hint" id="filterHint">
-      Los filtros aplican al hacer click en una card que los soporte.
+      Filtro global: aplica a todos los escenarios que lo soporten. El umbral
+      de brute-force se configura dentro de su card.
     </div>
   </div>
 
@@ -77,7 +69,17 @@
           <div class="ecp-sidebar-card__body">
             <div class="ecp-sidebar-card__title">{{ s.title }}</div>
             <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-            {% if s.accepts_filters %}
+            {% if s.id == 'brute-force' %}
+            <div class="ecp-sidebar-card__inline-filter" data-stop-click="true">
+              <label for="filterThreshold">Umbral:</label>
+              <select id="filterThreshold">
+                <option value="3">3 intentos</option>
+                <option value="5" selected>5 intentos</option>
+                <option value="10">10 intentos</option>
+                <option value="20">20 intentos</option>
+              </select>
+            </div>
+            {% elif s.accepts_filters %}
             <span class="ecp-sidebar-card__filters-flag">filtros: {{ s.accepts_filters | join(' + ') }}</span>
             {% endif %}
           </div>
@@ -92,7 +94,9 @@
       <!-- Banner del run activo (visible solo cuando hay run) -->
       <div class="ecp-runbanner" id="runBanner" style="display:none;">
         <div class="ecp-runbanner__title-wrap">
-          <span class="ecp-runbanner__icon" id="runBannerIcon">🤖</span>
+          <span class="ecp-runbanner__icon" id="runBannerIcon">
+            <img src="/static/img/iguana.svg" alt="Iguana" class="ecp-iguana ecp-iguana--md">
+          </span>
           <h2 class="ecp-runbanner__title" id="runBannerTitle">Ejecutando…</h2>
           <span class="ecp-filters-badge" id="filtersBadge" style="display:none;"></span>
         </div>
@@ -104,11 +108,12 @@
 
       <!-- Estado de bienvenida (visible cuando no hay run) -->
       <div class="ecp-welcome" id="welcome">
-        <div class="ecp-welcome__icon">🤖</div>
+        <img src="/static/img/iguana.svg" alt="Iguana mascota" class="ecp-iguana ecp-iguana--xl ecp-welcome__icon">
         <h2 class="ecp-welcome__title">TALENTO Operations Console</h2>
         <p class="ecp-welcome__sub">
-          Selecciona un escenario de la izquierda para que el agente IA lo analice.
-          Ajusta los filtros arriba (rango de tiempo, umbrales) para personalizar el análisis.
+          Selecciona un escenario de la izquierda para que el agente lo analice.
+          Ajusta el rango de tiempo arriba o el umbral dentro de la card de brute-force
+          para personalizar el análisis.
         </p>
         <div class="ecp-welcome__pills">
           <span class="ecp-welcome__pill"><strong>1.</strong> El agente decide qué tool usar</span>
