@@ -53,8 +53,103 @@ puede:
 | L2.0 | Segunda tool: AWX como ejecutor (smoke test hello-world) | ✅ Hecho |
 | L2.1 | Playbook real: snapshot del workspace (no invasivo, archivado en AWX) | ✅ Hecho |
 | L2.2 | Adaptive Card a Teams con resumen del snapshot | ✅ Hecho |
-| L2.3 | Acción invasiva real: restart container | ⏳ Necesita SP perms en Azure |
+| L2.3 | Errors-analysis + SOX audit + Brute-force detector + payroll-slow | ✅ Hecho |
+| **L2.5** | **Dashboard web "Operations Console" con paleta Ecopetrol** | **✅ Hecho** |
 | L3  | Disparador automático: alerta de App Insights → conversación | ⏳ Después |
+| L3.5 | Acción invasiva real: restart container (requiere SP perms en Azure) | ⏳ Después |
+
+## Dashboard web (L2.5) — TALENTO Operations Console
+
+Frontend visual para presentar el agente a gerencia y cliente final.
+Envuelve `bridge_l2.py` sin re-escribir su lógica. Identidad visual oficial de
+Ecopetrol Colombia ([manual de identidad](https://saaeuecpprdpecp.blob.core.windows.net/web/esp/manual-de-identidad/)).
+
+### Levantar el dashboard (con make)
+
+```bash
+# Demo real (toca Foundry/AWX/Teams)
+make demo
+
+# Modo desarrollo (uvicorn --reload, iteración rápida)
+make dev
+
+# Modo mock — eventos pregrabados, NO toca infra externa
+make mock
+```
+
+Browser: <http://localhost:8000>
+
+### Las 6 cards del dashboard
+
+| Card | JT | Para qué |
+|---|---|---|
+| 📊 Estado del Sistema | 48 | Inventario amplio del workspace |
+| 🚨 Errores en Producción | 49 | Detección ERROR/WARN críticos |
+| 🔐 Auditoría SOX | 50 | Logins, acciones privilegiadas, incidentes BD |
+| 🛡️ Detección de Brute Force | 51 | Failed logins por usuario sobre umbral |
+| ⏱️ Lentitud Cierre Nómina | 49 (ventana 4h) | Errores tipicos de cierre de nómina |
+| 🤖 Pregunta libre | varía | El agente decide qué tool usar |
+
+Cada card lanza un ciclo que se reporta vía SSE: hops del agente, tool calls,
+polling AWX, llegada de adaptive card a Teams, síntesis final estructurada.
+
+### Operación con `make`
+
+```bash
+make help                # Lista todos los targets
+make install             # Instala paquetes Python
+make test                # Smoke tests (19 checks)
+make pre-demo            # Checklist completo pre-demo
+make awx-status          # Resumen ejecutivo de AWX
+make awx-sync            # Re-sync project AWX desde Git
+make cli Q=5             # Ejecuta bridge_l2 desde CLI (Q=1..5)
+make inject-demo         # Inyecta failed logins sintéticos
+make stop                # Mata proceso uvicorn
+make clean               # Limpia __pycache__/
+make repo-status         # Branch + commits pendientes
+make rotate-secret-check # Recordatorio rotación de secrets
+```
+
+### Modo mock (`make mock`)
+
+Reproduce eventos pregrabados con timings realistas. **NO toca** Foundry, AWX
+ni Teams. Útil para:
+
+- Ensayar la demo sin gastar tokens ni jobs reales.
+- Demos en lugares sin conectividad estable.
+- Fallback si Azure/AWX cae justo antes de la reunión.
+
+Los 6 escenarios tienen mocks completos con artifacts realistas en
+[webapp/mock_events.py](webapp/mock_events.py).
+
+### Identidad visual Ecopetrol
+
+Paleta oficial (manual público):
+
+- **Primarios**: `#F7DB17` amarillo (Pantone 109C), `#CCD32A` verde lima (382C),
+  `#004236` verde azulado oscuro (3308C — color institucional).
+- **Complementarios**: `#00214D` azul marino, `#FF5F00` naranja, `#403833` marrón.
+- **Tipografía**: **Verdana** (preferida según manual), Cambria para texto extenso.
+- **Logo**: actualmente placeholder SVG en `webapp/static/img/logo-placeholder.svg`.
+  Para producción, reemplazar con el SVG aprobado por Comunicaciones Ecopetrol
+  (`catherine.villamil@ecopetrol.com.co`).
+
+### Estructura del dashboard
+
+```
+webapp/
+├── app.py              FastAPI + rutas (/, /api/scenarios, /api/run, /api/run/{id}/stream)
+├── scenarios.py        Catálogo de 6 cards con prompts pre-canned
+├── event_bus.py        asyncio.Queue thread-safe por run_id
+├── bridge_runner.py    Wrapper que corre bridge_l2 en thread + filtra secrets
+├── mock_events.py      Secuencias pregrabadas para ?mock=1 / FORCE_MOCK=1
+├── templates/index.html
+└── static/
+    ├── css/ecp.css     Paleta Ecopetrol + componentes
+    ├── js/ecp.js       EventSource + UI lifecycle
+    ├── js/renderers.js 5 renderers (snapshot/errors/sox/brute-force/generic)
+    └── img/logo-placeholder.svg
+```
 
 ## Cómo correrlo (WSL Oracle Linux 9)
 
