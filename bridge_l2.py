@@ -70,11 +70,20 @@ DEMO_QUESTIONS = {
         "runtime de automatizacion. Reporta job_id, status y resumen del "
         "stdout."
     ),
+    "4": (
+        "¿Tenemos errores o warnings significativos en TALENTO en las "
+        "ultimas 24 horas? Lanza el analisis especifico de errores via AWX "
+        "(template_id=49) y sintetiza los hallazgos: cuantos eventos "
+        "criticos, que containers estan afectados, y cuales son los top "
+        "mensajes recurrentes. Indica el nivel de severidad global."
+    ),
 }
 
 # Templates AWX que requieren credenciales Azure inyectadas como extra_vars
-# (porque AWX no nos deja crear custom credential types sin superuser)
-TEMPLATES_NEEDING_AZURE_CREDS = {48}
+# (porque AWX no nos deja crear custom credential types sin superuser).
+# 48 = talento-workspace-snapshot
+# 49 = talento-errors-analysis
+TEMPLATES_NEEDING_AZURE_CREDS = {48, 49}
 DEFAULT_QUESTION_KEY = "1"
 
 
@@ -238,12 +247,17 @@ SYSTEM_INSTRUCTIONS = (
     "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
     "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
     "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un job "
-    "   template en AWX (runtime de automatizacion). Para ACCIONES operativas, "
-    "   snapshots, remediaciones, smoke tests. Templates disponibles HOY:\n"
+    "   template en AWX. Para ACCIONES operativas: snapshots, analisis de "
+    "   errores, remediaciones, smoke tests. Templates HOY:\n"
     "   - id=47 talento-smoke-test (hello world, sin efecto real)\n"
-    "   - id=48 talento-workspace-snapshot (snapshot diagnostico no invasivo: "
-    "     descubre tablas pobladas, esquema de la principal, muestra de "
-    "     eventos. extra_vars opcional: {\"time_range_hours\": <int>} default 24)\n\n"
+    "   - id=48 talento-workspace-snapshot (inventario amplio del workspace: "
+    "     tablas pobladas + schema + muestra. Para preguntas tipo 'que hay'). "
+    "     extra_vars opcional: {\"time_range_hours\": <int>} default 24.\n"
+    "   - id=49 talento-errors-analysis (FOCO en ERROR y WARN: clasifica "
+    "     severidad, top 5 mensajes, containers afectados, severity_status "
+    "     CRITICAL/WARN/OK. Para preguntas tipo 'que problemas tenemos'). "
+    "     extra_vars opcional: {\"time_range_hours\": <int>} default 24.\n"
+    "   Ambos 48 y 49 envian adaptive card a Teams automaticamente.\n\n"
     "PROTOCOLO:\n"
     "A) Para preguntas operativas: primero descubrimiento con "
     "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
@@ -304,8 +318,9 @@ TOOL_RUN_AWX = FunctionTool(
                 "type": "integer",
                 "description": (
                     "ID del job template. Disponibles: "
-                    "47 (talento-smoke-test, hello world sin efecto), "
-                    "48 (talento-workspace-snapshot, snapshot diagnostico no invasivo)."
+                    "47 (talento-smoke-test, hello world), "
+                    "48 (talento-workspace-snapshot, inventario amplio), "
+                    "49 (talento-errors-analysis, foco en ERROR/WARN)."
                 ),
             },
             "extra_vars_json": {
