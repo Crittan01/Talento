@@ -1,0 +1,61 @@
+---
+- name: Validar conexion desde AWX hacia Azure Log Analytics
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    client_id: "{{ lookup('env', 'AZURE_CLIENT_ID') }}"
+    client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') }}"
+    workspace_id: "{{ lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID') }}"
+
+  tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - workspace_id | length > 0
+        fail_msg: "Faltan variables de entorno requeridas."
+        success_msg: "Variables requeridas presentes."
+
+    - name: Obtener token OAuth2 para Log Analytics API
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+      register: token_response
+
+    - name: Guardar access token
+      ansible.builtin.set_fact:
+        loganalytics_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Consultar Log Analytics con KQL simple
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ loganalytics_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            print Estado="OK", Origen="AWX", FechaHora=now()
+        return_content: true
+        status_code: 200
+      register: loganalytics_query
+
+    - name: Mostrar respuesta de Log Analytics
+      ansible.builtin.debug:
+        var: loganalytics_query.json

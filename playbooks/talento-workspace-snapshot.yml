@@ -1,0 +1,149 @@
+---
+# talento-workspace-snapshot.yml
+#
+# Snapshot diagnostico no-invasivo del workspace de Log Analytics de TALENTO.
+# Disenado para ser invocado desde el agente de Foundry como una accion
+# de "recuperar contexto operativo" auditada via AWX.
+#
+# Parametros (extra_vars):
+#   time_range_hours: rango de horas a inspeccionar (default 24)
+#
+# Salida (artifacts via set_stats):
+#   - tables_populated: lista de tablas con datos en el rango
+#   - schemas: esquemas de las 2 tablas mas pobladas
+#   - sample_events: ultimas filas de la tabla mas poblada
+#
+# Credenciales (desde el entorno del Job Template):
+#   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, LOG_ANALYTICS_WORKSPACE_ID
+
+- name: Talento workspace snapshot — diagnostico no invasivo
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    time_range_hours: "{{ time_range_hours | default(24) }}"
+    tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    client_id: "{{ lookup('env', 'AZURE_CLIENT_ID') }}"
+    client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') }}"
+    workspace_id: "{{ lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID') }}"
+
+  tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - workspace_id | length > 0
+        fail_msg: "Faltan variables de entorno (AZURE_TENANT_ID / CLIENT_ID / CLIENT_SECRET / LOG_ANALYTICS_WORKSPACE_ID)"
+
+    - name: Obtener token OAuth2 para Log Analytics
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar access token
+      ansible.builtin.set_fact:
+        la_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Descubrir tablas con datos en el rango {{ time_range_hours }}h
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            union withsource=Tabla *
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | summarize Registros=count() by Tabla
+            | order by Registros desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: tables_query
+
+    - name: Extraer lista de tablas pobladas
+      ansible.builtin.set_fact:
+        tables_populated: >-
+          {{
+            tables_query.json.tables[0].rows
+            | map('zip', tables_query.json.tables[0].columns | map(attribute='name'))
+            | map('map', 'reverse')
+            | map('community.general.dict')
+            | list
+          }}
+
+    - name: Mostrar tablas encontradas
+      ansible.builtin.debug:
+        msg: "Tablas con datos en {{ time_range_hours }}h: {{ tables_populated | length }}"
+
+    - name: Obtener esquema de la tabla mas poblada
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: "{{ tables_populated[0].Tabla }} | getschema"
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: top_table_schema
+      when: tables_populated | length > 0
+
+    - name: Obtener muestra de eventos de la tabla mas poblada
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: "{{ tables_populated[0].Tabla }} | where TimeGenerated > ago({{ time_range_hours }}h) | take 10"
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: top_table_sample
+      when: tables_populated | length > 0
+
+    - name: Exponer resultados como artifacts (set_stats)
+      ansible.builtin.set_stats:
+        data:
+          snapshot_timestamp: "{{ ansible_date_time.iso8601 | default('') }}"
+          time_range_hours: "{{ time_range_hours }}"
+          tables_populated: "{{ tables_populated | default([]) }}"
+          top_table: "{{ tables_populated[0].Tabla | default('none') }}"
+          top_table_rows: "{{ tables_populated[0].Registros | default(0) }}"
+          schema_columns: "{{ top_table_schema.json.tables[0].rows | default([]) | length }}"
+          sample_rows: "{{ top_table_sample.json.tables[0].rows | default([]) | length }}"
+        per_host: false
+
+    - name: Resumen para stdout
+      ansible.builtin.debug:
+        msg:
+          - "=== TALENTO WORKSPACE SNAPSHOT ==="
+          - "Rango: {{ time_range_hours }}h"
+          - "Tablas con datos: {{ tables_populated | length }}"
+          - "Top tabla: {{ tables_populated[0].Tabla | default('ninguna') }} ({{ tables_populated[0].Registros | default(0) }} filas)"
+          - "Esquema columnas: {{ top_table_schema.json.tables[0].rows | default([]) | length }}"
+          - "Muestra eventos: {{ top_table_sample.json.tables[0].rows | default([]) | length }}"

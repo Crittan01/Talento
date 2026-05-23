@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""
+bridge_l2.py — DEMO L2 del proyecto talento-ecopetrol.
+
+Extiende L1 (Foundry agent + Log Analytics) anadiendo una segunda tool:
+run_awx_job_template, que permite al agente disparar playbooks en AWX para
+acciones de remediacion o snapshots.
+
+Ciclo demostrado:
+  pregunta -> agente Foundry
+            -> tool 1: query_log_analytics (diagnostico)
+            -> tool 2: run_awx_job_template (accion via AWX)
+            -> respuesta sintetizada
+
+Uso:
+  python3 bridge_l2.py                  # corre la pregunta default
+  python3 bridge_l2.py 1|2|3            # preguntas predefinidas
+  python3 bridge_l2.py "tu pregunta"    # libre
+  python3 bridge_l2.py --no-setup       # salta create_version
+
+Prereqs:
+  - L1 prereqs: az login + paquetes Python + .env con credenciales Azure
+  - Adicionales en .env: AWX_URL, AWX_TOKEN
+
+Referencias oficiales:
+  - Function calling Foundry:
+    https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/function-calling
+  - AWX REST API:
+    https://ansible.readthedocs.io/projects/awx/en/latest/rest_api/api_ref.html
+"""
+
+import json
+import sys
+import time
+from pathlib import Path
+
+import requests
+import urllib3
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import FunctionTool, PromptAgentDefinition
+from azure.identity import DefaultAzureCredential
+
+# Suprime warning por el cert autofirmado del AWX nip.io local
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# ============================================================================
+# Configuracion
+# ============================================================================
+PROJECT_ENDPOINT = "https://aifoundry-is2.services.ai.azure.com/api/projects/proj-foundry-is2"
+MODEL_DEPLOYMENT = "talento-gpt4o-mini"
+AGENT_NAME = "talento-triage-agent"
+
+ENV_PATH = Path(__file__).parent / ".env"
+
+DEMO_QUESTIONS = {
+    "1": (
+        "Realiza un health check operativo de TALENTO: primero diagnostica si "
+        "hay errores recientes en el workspace, luego ejecuta el smoke test "
+        "del runtime de automatizacion AWX (template_id=47) para verificar "
+        "que tenemos via de remediacion disponible. Reporta los dos resultados."
+    ),
+    "2": (
+        "Detectaste antes que aci-centralecopetrol tiene errores de "
+        "Authentication failed en envio de correo. Si tuvieras un job template "
+        "AWX para reiniciar containers, lo lanzarias? Por ahora valida el "
+        "runtime con el smoke test (template_id=47) y explica que harias en "
+        "produccion."
+    ),
+    "3": (
+        "Lanza el job template id 47 en AWX como prueba de cable agente <-> "
+        "runtime de automatizacion. Reporta job_id, status y resumen del "
+        "stdout."
+    ),
+}
+DEFAULT_QUESTION_KEY = "1"
+
+
+# ============================================================================
+# Carga del .env
+# ============================================================================
+def load_env(path: Path) -> dict:
+    env = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+ENV = load_env(ENV_PATH)
+
+
+# ============================================================================
+# Tool 1: Log Analytics (heredado de L1)
+# ============================================================================
+def get_la_token() -> str:
+    resp = requests.post(
+        f"https://login.microsoftonline.com/{ENV['AZURE_TENANT_ID']}/oauth2/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": ENV["AZURE_CLIENT_ID"],
+            "client_secret": ENV["AZURE_CLIENT_SECRET"],
+            "resource": "https://api.loganalytics.io",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def execute_kql(query: str) -> dict:
+    if "| take " not in query.lower() and "| top " not in query.lower():
+        query = query.rstrip() + " | take 100"
+    token = get_la_token()
+    resp = requests.post(
+        f"https://api.loganalytics.azure.com/v1/workspaces/{ENV['LOG_ANALYTICS_WORKSPACE_ID']}/query",
+        json={"query": query},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text[:2000]}
+        return {
+            "error": f"HTTP {resp.status_code}",
+            "details": body,
+            "query_used": query,
+            "hint": "Si SemanticError, ejecuta '<tabla> | getschema' primero.",
+        }
+    data = resp.json()
+    if not data.get("tables") or not data["tables"][0].get("rows"):
+        return {"rows": 0, "data": [], "query_used": query}
+    table = data["tables"][0]
+    columns = [c["name"] for c in table["columns"]]
+    rows = [dict(zip(columns, row)) for row in table["rows"]]
+    return {"rows": len(rows), "columns": columns, "data": rows, "query_used": query}
+
+
+# ============================================================================
+# Tool 2: AWX Job Template
+# ============================================================================
+def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
+    """Lanza un job template en AWX, polea hasta completar, devuelve resultado."""
+    base = ENV["AWX_URL"].rstrip("/")
+    headers = {"Authorization": f"Bearer {ENV['AWX_TOKEN']}"}
+
+    # Launch
+    launch_resp = requests.post(
+        f"{base}/api/v2/job_templates/{template_id}/launch/",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"extra_vars": extra_vars or {}},
+        verify=False,
+        timeout=30,
+    )
+    if launch_resp.status_code not in (200, 201, 202):
+        return {
+            "error": f"Launch fallo: HTTP {launch_resp.status_code}",
+            "details": launch_resp.text[:500],
+            "template_id": template_id,
+        }
+    launched = launch_resp.json()
+    job_id = launched.get("id") or launched.get("job")
+    if not job_id:
+        return {"error": "Sin job_id en respuesta del launch", "details": launched}
+
+    # Poll status (max ~120s)
+    final_job = None
+    for attempt in range(40):
+        time.sleep(3)
+        s = requests.get(
+            f"{base}/api/v2/jobs/{job_id}/",
+            headers=headers,
+            verify=False,
+            timeout=30,
+        )
+        if s.status_code != 200:
+            continue
+        job = s.json()
+        if job["status"] in ("successful", "failed", "error", "canceled"):
+            final_job = job
+            break
+    if final_job is None:
+        return {"error": "Timeout (~120s) esperando job", "job_id": job_id}
+
+    # Stdout (tail)
+    so = requests.get(
+        f"{base}/api/v2/jobs/{job_id}/stdout/?format=txt",
+        headers=headers,
+        verify=False,
+        timeout=30,
+    )
+    stdout = so.text if so.status_code == 200 else "[stdout no disponible]"
+
+    return {
+        "job_id": job_id,
+        "status": final_job["status"],
+        "elapsed_seconds": final_job.get("elapsed"),
+        "started": final_job.get("started"),
+        "finished": final_job.get("finished"),
+        "artifacts": final_job.get("artifacts", {}),
+        "stdout_tail": stdout[-2000:],
+        "awx_url": f"{base}/#/jobs/playbook/{job_id}",
+    }
+
+
+# ============================================================================
+# Setup del agente — 2 tools registradas
+# ============================================================================
+SYSTEM_INSTRUCTIONS = (
+    "Eres un asistente experto en analisis y remediacion de incidentes IT, "
+    "especializado en la solucion corporativa TALENTO: sistema de gestion de "
+    "talento humano, IaaS, operacion 7x24, regulado por SOX. Componentes en "
+    "Azure (App Service, Azure SQL, Container Instances, Application Insights, "
+    "Log Analytics) y aplicaciones OnPremise (Windows Server 2019, Oracle 12c, "
+    "NAS/SAN).\n\n"
+    "Tienes DOS tools:\n\n"
+    "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
+    "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
+    "2. run_awx_job_template(template_id, extra_vars): ejecuta un job template "
+    "   en AWX (runtime de automatizacion). Para ACCIONES operativas, "
+    "   snapshots, remediaciones, smoke tests. Templates disponibles HOY:\n"
+    "   - id=47 talento-smoke-test (hello world, sin efecto real)\n\n"
+    "PROTOCOLO:\n"
+    "A) Para preguntas operativas: primero descubrimiento con "
+    "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
+    "   summarize count() by Tabla | order by count_ desc'.\n"
+    "B) Si necesitas el esquema de una tabla, '<tabla> | getschema' antes de "
+    "   queries complejas.\n"
+    "C) Si el usuario pide ejecutar una accion o validar el runtime de "
+    "   automatizacion, usa run_awx_job_template con el template_id apropiado.\n"
+    "D) Tras una accion AWX, verifica con query_log_analytics si los datos "
+    "   reflejan el cambio (cuando aplique).\n\n"
+    "RESPUESTA FINAL siempre en espanol, estructurada:\n"
+    "- Hallazgo (datos concretos)\n"
+    "- Hipotesis (1-3 ordenadas por probabilidad)\n"
+    "- Pasos de diagnostico (que validar)\n"
+    "- Accion correctiva (que se hizo / que hacer)\n\n"
+    "Tecnico, conciso. No inventes datos. Si una tool falla, lee el hint y "
+    "reintenta."
+)
+
+TOOL_QUERY_LA = FunctionTool(
+    name="query_log_analytics",
+    description=(
+        "Ejecuta una consulta KQL contra el workspace de Log Analytics de "
+        "TALENTO. Usala para diagnostico, descubrimiento de tablas pobladas, "
+        "y verificacion de estado tras una accion. Primer hop SIEMPRE: "
+        "descubrimiento con 'union withsource=Tabla *'."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "KQL valida. Tablas conocidas: ContainerInstanceLog_CL, "
+                    "ContainerEvent_CL (con datos), AppExceptions/AppRequests/"
+                    "AppTraces/AppDependencies (pueden estar vacias). "
+                    "Descubre primero, luego getschema, luego query final."
+                ),
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_RUN_AWX = FunctionTool(
+    name="run_awx_job_template",
+    description=(
+        "Lanza un Job Template en AWX (runtime de automatizacion) y espera "
+        "a que termine. Usala para EJECUTAR acciones operativas: smoke tests, "
+        "snapshots diagnosticos, remediaciones (cuando esten disponibles). "
+        "Devuelve job_id, status (successful/failed), elapsed_seconds y "
+        "stdout_tail del playbook."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "template_id": {
+                "type": "integer",
+                "description": (
+                    "ID del job template a lanzar. Disponibles hoy: 47 "
+                    "(talento-smoke-test, hello world sin efecto)."
+                ),
+            },
+        },
+        "required": ["template_id"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+
+def setup_agent_version(project: AIProjectClient):
+    return project.agents.create_version(
+        agent_name=AGENT_NAME,
+        definition=PromptAgentDefinition(
+            model=MODEL_DEPLOYMENT,
+            instructions=SYSTEM_INSTRUCTIONS,
+            tools=[TOOL_QUERY_LA, TOOL_RUN_AWX],
+        ),
+    )
+
+
+# ============================================================================
+# Procesamiento de respuestas (multi-hop)
+# ============================================================================
+def process_response_items(response, hop: int):
+    text_chunks = []
+    fn_outputs = []
+    for item in response.output:
+        itype = getattr(item, "type", None)
+        if itype == "function_call":
+            args = json.loads(item.arguments)
+            print(f"\n  🤖 hop {hop} → llama tool: {item.name}")
+            if item.name == "query_log_analytics":
+                print(f"     KQL: {args.get('query', '')}")
+                t0 = time.time()
+                result = execute_kql(args["query"])
+                elapsed = time.time() - t0
+                if "error" in result:
+                    print(f"     ⚠️  KQL ERROR ({elapsed:.1f}s): {result['error']}")
+                else:
+                    print(f"     ✓ KQL OK ({elapsed:.1f}s): {result['rows']} filas")
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+            elif item.name == "run_awx_job_template":
+                tpl = args.get("template_id")
+                print(f"     AWX template_id={tpl}")
+                t0 = time.time()
+                result = run_awx_job_template(tpl)
+                elapsed = time.time() - t0
+                if "error" in result:
+                    print(f"     ⚠️  AWX ERROR ({elapsed:.1f}s): {result['error']}")
+                else:
+                    print(f"     ✓ AWX {result['status']} en {result.get('elapsed_seconds','?')}s")
+                    print(f"       job_id={result['job_id']}  ({result.get('awx_url','')})")
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+        elif itype == "message":
+            content = getattr(item, "content", None)
+            if content:
+                for c in content:
+                    text_val = getattr(c, "text", None)
+                    if text_val:
+                        text_chunks.append(text_val)
+    return "\n".join(text_chunks), fn_outputs
+
+
+def run_cycle(project, agent_name, user_question, max_hops=8):
+    openai_client = project.get_openai_client()
+    conversation = openai_client.conversations.create()
+
+    print(f"\n  👤 Usuario: {user_question}")
+    t_total = time.time()
+
+    response = openai_client.responses.create(
+        input=user_question,
+        conversation=conversation.id,
+        extra_body={"agent_reference": {"name": agent_name, "type": "agent_reference"}},
+    )
+
+    final_text = ""
+    for hop in range(1, max_hops + 1):
+        text, fn_outputs = process_response_items(response, hop)
+        if text:
+            final_text = text
+        if not fn_outputs:
+            break
+        response = openai_client.responses.create(
+            input=fn_outputs,
+            conversation=conversation.id,
+            extra_body={"agent_reference": {"name": agent_name, "type": "agent_reference"}},
+        )
+    else:
+        print(f"\n  ⚠️  Limite de {max_hops} hops alcanzado.")
+
+    if not final_text:
+        final_text = getattr(response, "output_text", "") or "[sin respuesta de texto]"
+
+    elapsed = time.time() - t_total
+    print("\n" + "═" * 78)
+    print("  🤖 RESPUESTA FINAL DEL AGENTE")
+    print("═" * 78)
+    print(final_text)
+    print("═" * 78)
+    print(f"  ⏱  Tiempo total: {elapsed:.1f}s")
+
+
+# ============================================================================
+# Entry point
+# ============================================================================
+def parse_args():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = [a for a in sys.argv[1:] if a.startswith("--")]
+    no_setup = "--no-setup" in flags
+    if not args:
+        question = DEMO_QUESTIONS[DEFAULT_QUESTION_KEY]
+    elif args[0] in DEMO_QUESTIONS:
+        question = DEMO_QUESTIONS[args[0]]
+    else:
+        question = " ".join(args)
+    return question, no_setup
+
+
+def main():
+    question, no_setup = parse_args()
+
+    print("┌" + "─" * 76 + "┐")
+    print("│  bridge_l2.py — DEMO L2 talento-ecopetrol" + " " * 34 + "│")
+    print("│  Tools: query_log_analytics + run_awx_job_template" + " " * 25 + "│")
+    print("└" + "─" * 76 + "┘")
+
+    print("\n► Conectando a Foundry...")
+    project = AIProjectClient(
+        endpoint=PROJECT_ENDPOINT,
+        credential=DefaultAzureCredential(),
+    )
+
+    agent_name = AGENT_NAME
+    if not no_setup:
+        print("► Registrando 2 tools en nueva version del agente...")
+        agent = setup_agent_version(project)
+        print(f"  ✓ Version activa: {agent.name}:{agent.version}")
+        agent_name = agent.name
+    else:
+        print("► (--no-setup) Usando ultima version existente del agente")
+
+    print("\n► Iniciando ciclo conversacional...")
+    run_cycle(project, agent_name, question)
+
+
+if __name__ == "__main__":
+    main()

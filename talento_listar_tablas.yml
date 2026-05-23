@@ -1,0 +1,119 @@
+---
+- name: Validar datos reales en Log Analytics
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') }}"
+    client_id: "{{ lookup('env', 'AZURE_CLIENT_ID') }}"
+    client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') }}"
+    workspace_id: "{{ lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID') }}"
+
+  tasks:
+    - name: Obtener token OAuth2 para Log Analytics API
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+      register: token_response
+      no_log: true
+
+    - name: Guardar access token
+      ansible.builtin.set_fact:
+        loganalytics_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Listar tablas con datos recientes
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ loganalytics_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            union withsource=Tabla *
+            | where TimeGenerated > ago(24h)
+            | summarize Registros=count() by Tabla
+            | top 30 by Registros desc
+        return_content: true
+        status_code: 200
+      register: tablas_recientes
+
+    - name: Mostrar tablas encontradas
+      ansible.builtin.debug:
+        var: tablas_recientes.json.tables[0].rows
+
+    - name: Ver esquema de ContainerInstanceLog_CL
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ loganalytics_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | getschema
+        return_content: true
+        status_code: 200
+      register: schema_container_logs
+
+    - name: Mostrar esquema ContainerInstanceLog_CL
+      ansible.builtin.debug:
+        var: schema_container_logs.json.tables[0].rows
+
+    - name: Ver logs recientes de ACI
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ loganalytics_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago(24h)
+            | order by TimeGenerated desc
+            | take 20
+        return_content: true
+        status_code: 200
+      register: aci_logs
+
+    - name: Mostrar logs recientes de ACI
+      ansible.builtin.debug:
+        var: aci_logs.json.tables[0].rows
+
+    - name: Ver eventos recientes de ACI
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ loganalytics_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerEvent_CL
+            | where TimeGenerated > ago(24h)
+            | order by TimeGenerated desc
+            | take 20
+        return_content: true
+        status_code: 200
+      register: aci_events
+
+    - name: Mostrar eventos recientes de ACI
+      ansible.builtin.debug:
+        var: aci_events.json.tables[0].rows
