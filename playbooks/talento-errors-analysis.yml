@@ -1,0 +1,242 @@
+---
+# talento-errors-analysis.yml
+#
+# Analisis especifico de errores y warnings en el workspace de Log Analytics
+# de TALENTO. Disenado para ser invocado por el agente de triage cuando se
+# pregunta "que problemas tenemos / hay errores recientes?".
+#
+# Diferencia con talento-workspace-snapshot.yml:
+#   - snapshot = inventario amplio (tablas pobladas, esquemas, muestras)
+#   - errors-analysis = enfoque solo en ERROR y WARN, top mensajes,
+#                       containers afectados, severidad clasificada
+#
+# Parametros (extra_vars):
+#   time_range_hours: rango (default 24)
+#   azure_*: credenciales (mismas que snapshot)
+#   teams_webhook_url: webhook opcional para adaptive card
+#
+# Salida via set_stats:
+#   total_errors, total_warnings, top_messages (lista), affected_containers,
+#   severity_status (CRITICAL|WARN|OK)
+
+- name: TALENTO errors & warnings analysis
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    time_range_hours: "{{ time_range_hours | default(24) }}"
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    workspace_id: "{{ log_analytics_workspace_id | default(lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID')) }}"
+    teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+  tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - workspace_id | length > 0
+        fail_msg: "Faltan variables azure_* — pasar como extra_vars o env."
+
+    - name: Obtener token OAuth2 para Log Analytics
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body_format: form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://api.loganalytics.io"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar access token
+      ansible.builtin.set_fact:
+        la_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Contar errores y warnings por severidad
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | extend Severity = case(
+                Message contains " ERROR ", "ERROR",
+                Message contains " WARN ",  "WARN",
+                Message contains "Exception", "ERROR",
+                Message contains "failed",   "WARN",
+                "OTHER")
+            | where Severity in ("ERROR", "WARN")
+            | summarize Count=count() by Severity
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: severity_query
+
+    - name: Procesar conteo por severidad
+      ansible.builtin.set_fact:
+        severity_rows: "{{ severity_query.json.tables[0].rows | default([]) }}"
+
+    - name: Extraer totales por severidad
+      ansible.builtin.set_fact:
+        total_errors: "{{ (severity_rows | selectattr(0, 'equalto', 'ERROR') | list | first | default([0,0]))[1] | int }}"
+        total_warnings: "{{ (severity_rows | selectattr(0, 'equalto', 'WARN')  | list | first | default([0,0]))[1] | int }}"
+
+    - name: Calcular severity_status global
+      ansible.builtin.set_fact:
+        severity_status: >-
+          {{ 'CRITICAL' if total_errors | int > 0
+             else ('WARN' if total_warnings | int > 0 else 'OK') }}
+        card_color: >-
+          {{ 'attention' if total_errors | int > 0
+             else ('warning' if total_warnings | int > 0 else 'good') }}
+
+    - name: Top 5 mensajes de ERROR/WARN
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains " ERROR " or Message contains " WARN "
+                 or Message contains "Exception" or Message contains "failed"
+            | extend Snippet = substring(Message, 0, 200)
+            | summarize Count=count() by Snippet
+            | top 5 by Count desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: top_messages_query
+
+    - name: Containers afectados
+      ansible.builtin.uri:
+        url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ la_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          query: |
+            ContainerInstanceLog_CL
+            | where TimeGenerated > ago({{ time_range_hours }}h)
+            | where Message contains " ERROR " or Message contains " WARN "
+                 or Message contains "Exception" or Message contains "failed"
+            | summarize Errores=count() by ContainerName_s
+            | order by Errores desc
+        return_content: true
+        status_code: 200
+        timeout: 60
+      register: containers_query
+
+    - name: Exportar resultados via set_stats
+      ansible.builtin.set_stats:
+        data:
+          time_range_hours: "{{ time_range_hours }}"
+          total_errors: "{{ total_errors }}"
+          total_warnings: "{{ total_warnings }}"
+          severity_status: "{{ severity_status }}"
+          top_messages: "{{ top_messages_query.json.tables[0].rows | default([]) }}"
+          affected_containers: "{{ containers_query.json.tables[0].rows | default([]) }}"
+        per_host: false
+
+    - name: Resumen en stdout
+      ansible.builtin.debug:
+        msg:
+          - "=== TALENTO ERRORS & WARNINGS ANALYSIS ==="
+          - "Rango: {{ time_range_hours }} horas"
+          - "Severity status: {{ severity_status }}"
+          - "Total ERROR: {{ total_errors }}"
+          - "Total WARN:  {{ total_warnings }}"
+          - "Containers afectados: {{ containers_query.json.tables[0].rows | default([]) | length }}"
+          - "Top mensajes (count, snippet):"
+          - "{{ top_messages_query.json.tables[0].rows | default([]) }}"
+
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ card_color }}"
+                    items:
+                      - type: TextBlock
+                        text: "{{ '🚨' if severity_status == 'CRITICAL' else ('⚠️' if severity_status == 'WARN' else '✅') }} TALENTO Errors & Warnings"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "Estado: {{ severity_status }} | Rango: últimas {{ time_range_hours }}h"
+                        isSubtle: true
+                        spacing: None
+                  - type: FactSet
+                    facts:
+                      - title: "Errores"
+                        value: "{{ total_errors }}"
+                      - title: "Warnings"
+                        value: "{{ total_warnings }}"
+                      - title: "Containers afectados"
+                        value: "{{ containers_query.json.tables[0].rows | default([]) | length }}"
+                      - title: "Total eventos críticos"
+                        value: "{{ (total_errors | int) + (total_warnings | int) }}"
+                  - type: TextBlock
+                    text: "Top 5 mensajes más frecuentes"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in top_messages_query.json.tables[0].rows | default([]) %}**{{ row[1] }}×** — {{ row[0] | truncate(150, true, '…') | replace('\n',' ') }}\n\n{% endfor %}{% if (top_messages_query.json.tables[0].rows | default([])) | length == 0 %}_No se encontraron errores ni warnings en el rango analizado._{% endif %}"
+                    wrap: true
+                  - type: TextBlock
+                    text: "Containers con problemas"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for row in containers_query.json.tables[0].rows | default([]) %}• **{{ row[0] }}**: {{ row[1] }} eventos\n{% endfor %}{% if (containers_query.json.tables[0].rows | default([])) | length == 0 %}_Ningún container con problemas en el rango._{% endif %}"
+                    wrap: true
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_webhook_url | length > 0
+      register: teams_notification
+      failed_when: false
+
+    - name: Reportar resultado notificación Teams
+      ansible.builtin.debug:
+        msg: >-
+          {% if teams_webhook_url | length == 0 %}
+          Teams webhook no configurado — skip notificación.
+          {% elif teams_notification.status | default(0) in [200, 202] %}
+          ✓ Adaptive card enviada (HTTP {{ teams_notification.status }}).
+          {% else %}
+          ⚠ Fallo notificación Teams (status {{ teams_notification.status | default('?') }}).
+          {% endif %}
