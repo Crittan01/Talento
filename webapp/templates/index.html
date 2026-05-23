@@ -6,6 +6,8 @@
   <title>TALENTO — Centro de Mando IA</title>
   <link rel="stylesheet" href="/static/css/ecp.css">
   <link rel="icon" href="/static/img/logo-placeholder.svg" type="image/svg+xml">
+  <!-- marked.js para render del markdown del agente -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
   <header class="ecp-header">
@@ -56,50 +58,79 @@
     </div>
   </div>
 
-  <main class="ecp-main ecp-main--no-panel" id="mainLayout">
+  <!-- ============ Layout principal: sidebar + main ============ -->
+  <main class="ecp-main" id="mainLayout">
 
-    <!-- ============ Cards de escenarios ============ -->
-    <section>
-      <div class="ecp-cards" id="cardsGrid">
+    <!-- ============ Sidebar izquierda con escenarios ============ -->
+    <aside class="ecp-sidebar" id="sidebar">
+      <div class="ecp-sidebar__title">Escenarios</div>
+      <div class="ecp-sidebar__list" id="cardsGrid">
         {% for s in scenarios %}
-        <article class="ecp-card {{ s.card_class }}"
+        <article class="ecp-sidebar-card {{ s.card_class }}"
                  data-scenario-id="{{ s.id }}"
                  data-renderer="{{ s.renderer }}"
                  data-free-text="{{ 'true' if s.free_text else 'false' }}"
-                 data-accepts-filters="{{ s.accepts_filters | join(',') }}">
-          <div class="ecp-card__spinner"></div>
-          <div class="ecp-card__icon">{{ s.icon }}</div>
-          <h3 class="ecp-card__title">{{ s.title }}</h3>
-          <p class="ecp-card__sub">{{ s.subtitle }}</p>
-          <p class="ecp-card__pain">{{ s.pain_point }}</p>
-          {% if s.accepts_filters %}
-          <span class="ecp-card__filters-flag">
-            usa filtros: {{ s.accepts_filters | join(' + ') }}
-          </span>
-          {% endif %}
+                 data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                 title="{{ s.pain_point }}">
+          <div class="ecp-sidebar-card__spinner"></div>
+          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+            {% if s.accepts_filters %}
+            <span class="ecp-sidebar-card__filters-flag">filtros: {{ s.accepts_filters | join(' + ') }}</span>
+            {% endif %}
+          </div>
         </article>
         {% endfor %}
       </div>
-    </section>
-
-    <!-- ============ Panel derecho (slide-in) ============ -->
-    <aside class="ecp-panel" id="panel" style="display:none;">
-      <div class="ecp-panel__header">
-        <h3 id="panelTitle">Ejecutando…</h3>
-        <div>
-          <span class="ecp-panel__elapsed" id="panelElapsed">0.0s</span>
-          <button class="ecp-panel__close" id="panelClose" title="Cerrar">×</button>
-        </div>
-      </div>
-      <div class="ecp-timeline" id="timeline"></div>
-      <div class="ecp-result" id="result">
-        <div class="ecp-result__empty">
-          <span class="ecp-result__empty-icon">🤖</span>
-          <div class="ecp-result__empty-text">El agente está trabajando<span class="ecp-loading-dots"></span></div>
-          <div class="ecp-result__empty-sub">Consultando Foundry, llamando a AWX, esperando respuesta…</div>
-        </div>
-      </div>
     </aside>
+
+    <!-- ============ Main content ============ -->
+    <section class="ecp-content" id="content">
+
+      <!-- Banner del run activo (visible solo cuando hay run) -->
+      <div class="ecp-runbanner" id="runBanner" style="display:none;">
+        <div class="ecp-runbanner__title-wrap">
+          <span class="ecp-runbanner__icon" id="runBannerIcon">🤖</span>
+          <h2 class="ecp-runbanner__title" id="runBannerTitle">Ejecutando…</h2>
+          <span class="ecp-filters-badge" id="filtersBadge" style="display:none;"></span>
+        </div>
+        <div class="ecp-runbanner__right">
+          <span class="ecp-runbanner__elapsed" id="panelElapsed">0.0s</span>
+          <button class="ecp-runbanner__close" id="panelClose" title="Cerrar y volver">✕</button>
+        </div>
+      </div>
+
+      <!-- Estado de bienvenida (visible cuando no hay run) -->
+      <div class="ecp-welcome" id="welcome">
+        <div class="ecp-welcome__icon">🤖</div>
+        <h2 class="ecp-welcome__title">TALENTO Operations Console</h2>
+        <p class="ecp-welcome__sub">
+          Selecciona un escenario de la izquierda para que el agente IA lo analice.
+          Ajusta los filtros arriba (rango de tiempo, umbrales) para personalizar el análisis.
+        </p>
+        <div class="ecp-welcome__pills">
+          <span class="ecp-welcome__pill"><strong>1.</strong> El agente decide qué tool usar</span>
+          <span class="ecp-welcome__pill"><strong>2.</strong> AWX ejecuta playbook auditado</span>
+          <span class="ecp-welcome__pill"><strong>3.</strong> Adaptive card al canal Teams</span>
+          <span class="ecp-welcome__pill"><strong>4.</strong> Síntesis estructurada en español</span>
+        </div>
+      </div>
+
+      <!-- Timeline (visible solo cuando hay run) -->
+      <div class="ecp-timeline-wrap" id="timelineWrap" style="display:none;">
+        <h3 class="ecp-section-title">⛓️ Línea de tiempo del agente</h3>
+        <div class="ecp-timeline" id="timeline"></div>
+      </div>
+
+      <!-- Resultado (visible solo cuando hay run, después del agent.final) -->
+      <div class="ecp-result-wrap" id="resultWrap" style="display:none;">
+        <h3 class="ecp-section-title">📋 Resultado estructurado</h3>
+        <div class="ecp-result" id="result"></div>
+      </div>
+
+    </section>
   </main>
 
   <!-- ============ Modal free-text ============ -->
@@ -107,7 +138,7 @@
     <div class="ecp-modal">
       <div class="ecp-modal__header">
         <strong>Pregunta libre al agente</strong>
-        <button class="ecp-panel__close" id="freeTextCancel" title="Cerrar">×</button>
+        <button class="ecp-modal__close" id="freeTextCancel" title="Cerrar">×</button>
       </div>
       <div class="ecp-modal__body">
         <p style="margin-top:0; color: var(--text-muted); font-size:12px;">

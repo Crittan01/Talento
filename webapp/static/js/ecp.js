@@ -20,12 +20,16 @@
 
   const el = {
     cards: document.getElementById('cardsGrid'),
-    main: document.getElementById('mainLayout'),
-    panel: document.getElementById('panel'),
-    panelTitle: document.getElementById('panelTitle'),
+    welcome: document.getElementById('welcome'),
+    runBanner: document.getElementById('runBanner'),
+    runBannerTitle: document.getElementById('runBannerTitle'),
+    runBannerIcon: document.getElementById('runBannerIcon'),
     panelElapsed: document.getElementById('panelElapsed'),
     panelClose: document.getElementById('panelClose'),
+    filtersBadge: document.getElementById('filtersBadge'),
+    timelineWrap: document.getElementById('timelineWrap'),
     timeline: document.getElementById('timeline'),
+    resultWrap: document.getElementById('resultWrap'),
     result: document.getElementById('result'),
     modal: document.getElementById('freeTextModal'),
     modalInput: document.getElementById('freeTextInput'),
@@ -64,7 +68,7 @@
   function markCardsAsUsingFilters() {
     const f = readFilters();
     const isDefault = f.time_range_hours === 24 && f.failed_threshold === 5;
-    el.cards.querySelectorAll('.ecp-card').forEach(c => {
+    el.cards.querySelectorAll('.ecp-sidebar-card').forEach(c => {
       const accepts = (c.dataset.acceptsFilters || '').split(',').filter(Boolean);
       c.dataset.filterActive = (!isDefault && accepts.length > 0) ? 'true' : 'false';
     });
@@ -109,7 +113,7 @@
   // Card click handler
   // -------------------------------------------------------------------------
   el.cards.addEventListener('click', (e) => {
-    const card = e.target.closest('.ecp-card');
+    const card = e.target.closest('.ecp-sidebar-card');
     if (!card) return;
     if (card.classList.contains('is-running')) return; // ya activa
 
@@ -167,31 +171,49 @@
   // -------------------------------------------------------------------------
   async function runScenario(card, scenarioId, renderer, freeText, filters) {
     if (state.activeRunId) {
-      alert('Hay un escenario en ejecución. Espera a que termine o cierra el panel.');
+      alert('Hay un escenario en ejecución. Espera a que termine o ciérralo.');
       return;
     }
 
     card.classList.add('is-running');
     state.activeCard = card;
     state.activeRenderer = renderer;
+    state.activeFilters = filters || {};
     state.awxUrl = null;
     state.artifacts = {};
 
-    // Abrir panel
-    el.main.classList.remove('ecp-main--no-panel');
-    el.panel.style.display = 'flex';
-    el.panelTitle.textContent = card.querySelector('.ecp-card__title').textContent;
+    // Cambiar layout: ocultar welcome, mostrar run banner + timeline
+    el.welcome.style.display = 'none';
+    el.runBanner.style.display = 'flex';
+    el.timelineWrap.style.display = 'block';
+    el.resultWrap.style.display = 'none'; // se muestra cuando llega agent.final
+
+    // Poblar banner
+    const cardIcon = card.querySelector('.ecp-sidebar-card__icon').textContent;
+    const cardTitle = card.querySelector('.ecp-sidebar-card__title').textContent;
+    el.runBannerIcon.textContent = cardIcon;
+    el.runBannerTitle.textContent = cardTitle;
+
+    // Badge de filtros aplicados (solo si difieren de defaults)
+    const filterStr = formatFiltersBadge(filters);
+    if (filterStr) {
+      el.filtersBadge.textContent = filterStr;
+      el.filtersBadge.style.display = 'inline-block';
+    } else {
+      el.filtersBadge.style.display = 'none';
+    }
+
     el.timeline.innerHTML = '';
-    el.result.innerHTML = `
-      <div class="ecp-result__empty">
-        <span class="ecp-result__empty-icon">🤖</span>
-        <div class="ecp-result__empty-text">El agente está trabajando<span class="ecp-loading-dots"></span></div>
-        <div class="ecp-result__empty-sub">Filtros: ${formatFiltersForDisplay(filters)}</div>
-      </div>
-    `;
+    el.result.innerHTML = '';
 
     state.startTime = Date.now();
     startElapsedTimer();
+
+    // Evento sintético: anunciar filtros aplicados en el timeline
+    const filterMsg = Object.keys(filters || {}).length > 0
+      ? Object.entries(filters).map(([k, v]) => `${k}=<strong>${v}</strong>`).join(', ')
+      : '<em>defaults</em>';
+    appendTimeline('info', '⚙️', `Filtros aplicados: ${filterMsg}`);
 
     let resp;
     try {
@@ -329,13 +351,7 @@
     }
   }
 
-  function formatFiltersForDisplay(filters) {
-    if (!filters || Object.keys(filters).length === 0) return 'defaults';
-    const parts = [];
-    if (filters.time_range_hours != null) parts.push(`${filters.time_range_hours}h`);
-    if (filters.failed_threshold != null) parts.push(`umbral ${filters.failed_threshold}`);
-    return parts.join(' · ');
-  }
+  // (helpers de formato ahora en formatFiltersBadge, ver más arriba)
 
   // -------------------------------------------------------------------------
   // Result render — usa el renderer del scenario
@@ -349,12 +365,40 @@
       console.error('Renderer error:', err);
       resultHtml = `<p style="color: var(--critical);">Error renderizando: ${escapeHtml(err.message)}</p>`;
     }
+    // Render del texto del agente como markdown si marked.js cargó, fallback a escape
+    let agentHtml;
+    if (window.marked) {
+      try {
+        agentHtml = marked.parse(finalText || '');
+      } catch (err) {
+        console.warn('marked.parse error:', err);
+        agentHtml = escapeHtml(finalText);
+      }
+    } else {
+      agentHtml = escapeHtml(finalText);
+    }
     el.result.innerHTML = resultHtml + `
       <div class="ecp-agent-reply">
         <div class="ecp-agent-reply__header">🤖 RESPUESTA DEL AGENTE</div>
-        ${escapeHtml(finalText)}
+        ${agentHtml}
       </div>
     `;
+    // Mostrar el wrapper del resultado (estaba oculto hasta agent.final)
+    el.resultWrap.style.display = 'block';
+  }
+
+  function formatFiltersBadge(filters) {
+    // Devuelve string del badge si los filtros difieren de defaults, o "" si no
+    if (!filters || Object.keys(filters).length === 0) return '';
+    const parts = [];
+    if (filters.time_range_hours != null && filters.time_range_hours !== 24) {
+      parts.push(`${filters.time_range_hours}h`);
+    }
+    if (filters.failed_threshold != null && filters.failed_threshold !== 5) {
+      parts.push(`umbral ${filters.failed_threshold}`);
+    }
+    if (parts.length === 0) return ''; // todos en defaults, no mostrar badge
+    return `Filtros: ${parts.join(' · ')}`;
   }
 
   // -------------------------------------------------------------------------
@@ -414,8 +458,14 @@
 
   function closePanel() {
     finishRun();
-    el.panel.style.display = 'none';
-    el.main.classList.add('ecp-main--no-panel');
+    // Volver al estado de bienvenida (el layout permanece estable)
+    el.runBanner.style.display = 'none';
+    el.timelineWrap.style.display = 'none';
+    el.resultWrap.style.display = 'none';
+    el.welcome.style.display = 'block';
+    el.timeline.innerHTML = '';
+    el.result.innerHTML = '';
+    el.filtersBadge.style.display = 'none';
     state.activeCard = null;
   }
 
