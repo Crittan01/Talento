@@ -445,3 +445,281 @@ body {
   margin-top: 24px;
 }
 .ecp-footer strong { color: var(--ecp-dark-teal); }
+
+/* ============================================================================
+   Connection status pills (header)
+   ============================================================================ */
+.ecp-conn-status {
+  display: flex;
+  gap: 8px;
+  margin-right: 12px;
+}
+.ecp-conn-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #FFF;
+  letter-spacing: 0.3px;
+  cursor: default;
+}
+.ecp-conn-pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ecp-gray);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+.ecp-conn-pill[data-state="ok"] .dot {
+  background: var(--ecp-lime);
+  box-shadow: 0 0 8px rgba(204, 211, 42, 0.7);
+}
+.ecp-conn-pill[data-state="warn"] .dot { background: var(--ecp-yellow); }
+.ecp-conn-pill[data-state="error"] .dot { background: var(--critical); }
+.ecp-conn-pill[data-state="unknown"] .dot {
+  background: var(--ecp-gray);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ============================================================================
+   Filter bar
+   ============================================================================ */
+.ecp-filterbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 28px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.ecp-filterbar__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ecp-filterbar__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ecp-dark-teal);
+  letter-spacing: 0.3px;
+}
+.ecp-filterbar__select {
+  font-family: Verdana, sans-serif;
+  font-size: 13px;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ecp-dark-teal);
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='%23004236'%3E%3Cpath d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 10px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.ecp-filterbar__select:hover { border-color: var(--ecp-dark-teal); }
+.ecp-filterbar__select:focus {
+  outline: none;
+  border-color: var(--ecp-yellow);
+  box-shadow: 0 0 0 3px rgba(247, 219, 23, 0.25);
+}
+.ecp-filterbar__hint {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+  font-style: italic;
+}
+.ecp-filterbar__group[hidden] { display: none; }
+
+/* ============================================================================
+   Timeline vertical con conectores
+   ============================================================================ */
+.ecp-timeline {
+  position: relative;
+}
+.ecp-timeline__item {
+  position: relative;
+  padding-left: 32px !important;
+  align-items: flex-start;
+}
+.ecp-timeline__item::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 26px;
+  bottom: -6px;
+  width: 2px;
+  background: var(--border);
+}
+.ecp-timeline__item:last-child::before { display: none; }
+.ecp-timeline__icon {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  background: var(--surface);
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  text-align: center;
+  font-size: 11px;
+  line-height: 16px;
+  z-index: 1;
+}
+.ecp-timeline__item--awx .ecp-timeline__icon {
+  border-color: var(--ecp-navy);
+  color: var(--ecp-navy);
+}
+.ecp-timeline__item--kql .ecp-timeline__icon {
+  border-color: var(--ecp-dark-teal);
+  color: var(--ecp-dark-teal);
+}
+.ecp-timeline__item--error .ecp-timeline__icon {
+  border-color: var(--critical);
+  color: var(--critical);
+  animation: shake 0.4s;
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px); }
+  75% { transform: translateX(2px); }
+}
+.ecp-timeline__item--final .ecp-timeline__icon {
+  border-color: var(--good);
+  background: var(--good);
+  color: #FFF;
+  animation: bounce 0.4s;
+}
+@keyframes bounce {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+/* ============================================================================
+   AWX Progress bar (durante polling)
+   ============================================================================ */
+.ecp-awx-progress {
+  background: var(--bg);
+  border-radius: 4px;
+  height: 6px;
+  margin-top: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.ecp-awx-progress__bar {
+  background: linear-gradient(90deg, var(--ecp-lime), var(--ecp-yellow));
+  height: 100%;
+  width: 0%;
+  transition: width 0.4s ease-out;
+  border-radius: 4px;
+}
+.ecp-awx-progress__bar--animated {
+  background: linear-gradient(
+    90deg,
+    var(--ecp-lime) 0%,
+    var(--ecp-yellow) 50%,
+    var(--ecp-lime) 100%
+  );
+  background-size: 200% 100%;
+  animation: progress-shimmer 1.5s linear infinite;
+}
+@keyframes progress-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* ============================================================================
+   Empty state mejorado
+   ============================================================================ */
+.ecp-result__empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 60px 20px;
+  font-style: normal;
+}
+.ecp-result__empty-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+  display: block;
+  animation: float 2.5s ease-in-out infinite;
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.ecp-result__empty-text {
+  font-size: 14px;
+  margin: 8px 0 4px;
+  color: var(--ecp-dark-teal);
+  font-weight: 600;
+}
+.ecp-result__empty-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ecp-loading-dots::after {
+  content: "";
+  display: inline-block;
+  width: 16px;
+  text-align: left;
+  animation: dots 1.4s steps(4, end) infinite;
+}
+@keyframes dots {
+  0%   { content: "·"; }
+  25%  { content: "··"; }
+  50%  { content: "···"; }
+  75%, 100% { content: ""; }
+}
+
+/* ============================================================================
+   Card hover (más sutil + indicador de filtros aplicables)
+   ============================================================================ */
+.ecp-card__filters-flag {
+  position: absolute;
+  bottom: 8px;
+  right: 10px;
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: var(--neutral-bg);
+  padding: 2px 6px;
+  border-radius: 8px;
+}
+.ecp-card[data-filter-active="true"] .ecp-card__filters-flag {
+  background: var(--ecp-lime);
+  color: var(--ecp-dark-teal);
+  font-weight: 700;
+}
+
+/* ============================================================================
+   Resultado: badges mas elegantes
+   ============================================================================ */
+.ecp-kpi {
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.ecp-kpi:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0, 66, 54, 0.08);
+}
+
+/* Severity badge animado al aparecer */
+.severity-badge {
+  animation: severity-in 0.4s ease-out;
+}
+@keyframes severity-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}

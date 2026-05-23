@@ -14,6 +14,11 @@
       <h1 class="ecp-header__h1">TALENTO — Centro de Mando IA</h1>
       <h2 class="ecp-header__h2">Agente IA · AWX · Log Analytics · Microsoft Teams</h2>
     </div>
+    <div class="ecp-conn-status" id="connStatus" title="Estado de conexión de los componentes">
+      <div class="ecp-conn-pill" data-svc="foundry"><span class="dot"></span>Foundry</div>
+      <div class="ecp-conn-pill" data-svc="awx"><span class="dot"></span>AWX</div>
+      <div class="ecp-conn-pill" data-svc="teams"><span class="dot"></span>Teams</div>
+    </div>
     <span class="ecp-badge">DEMO</span>
   </header>
 
@@ -22,6 +27,33 @@
     {% if force_mock %}
     <span class="mock-flag">MODO MOCK ACTIVO</span>
     {% endif %}
+  </div>
+
+  <!-- ============ Filter bar ============ -->
+  <div class="ecp-filterbar" id="filterbar">
+    <div class="ecp-filterbar__group">
+      <label for="filterTimeRange" class="ecp-filterbar__label">⏱️ Analizar últimas:</label>
+      <select id="filterTimeRange" class="ecp-filterbar__select">
+        <option value="1">1 hora</option>
+        <option value="4">4 horas</option>
+        <option value="12">12 horas</option>
+        <option value="24" selected>24 horas</option>
+        <option value="48">48 horas</option>
+        <option value="168">7 días</option>
+      </select>
+    </div>
+    <div class="ecp-filterbar__group" id="filterThresholdGroup">
+      <label for="filterThreshold" class="ecp-filterbar__label">🛡️ Umbral brute-force:</label>
+      <select id="filterThreshold" class="ecp-filterbar__select">
+        <option value="3">3 intentos</option>
+        <option value="5" selected>5 intentos</option>
+        <option value="10">10 intentos</option>
+        <option value="20">20 intentos</option>
+      </select>
+    </div>
+    <div class="ecp-filterbar__hint" id="filterHint">
+      Los filtros aplican al hacer click en una card que los soporte.
+    </div>
   </div>
 
   <main class="ecp-main ecp-main--no-panel" id="mainLayout">
@@ -33,12 +65,18 @@
         <article class="ecp-card {{ s.card_class }}"
                  data-scenario-id="{{ s.id }}"
                  data-renderer="{{ s.renderer }}"
-                 data-free-text="{{ 'true' if s.free_text else 'false' }}">
+                 data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                 data-accepts-filters="{{ s.accepts_filters | join(',') }}">
           <div class="ecp-card__spinner"></div>
           <div class="ecp-card__icon">{{ s.icon }}</div>
           <h3 class="ecp-card__title">{{ s.title }}</h3>
           <p class="ecp-card__sub">{{ s.subtitle }}</p>
           <p class="ecp-card__pain">{{ s.pain_point }}</p>
+          {% if s.accepts_filters %}
+          <span class="ecp-card__filters-flag">
+            usa filtros: {{ s.accepts_filters | join(' + ') }}
+          </span>
+          {% endif %}
         </article>
         {% endfor %}
       </div>
@@ -56,7 +94,9 @@
       <div class="ecp-timeline" id="timeline"></div>
       <div class="ecp-result" id="result">
         <div class="ecp-result__empty">
-          Esperando primer evento del agente…
+          <span class="ecp-result__empty-icon">🤖</span>
+          <div class="ecp-result__empty-text">El agente está trabajando<span class="ecp-loading-dots"></span></div>
+          <div class="ecp-result__empty-sub">Consultando Foundry, llamando a AWX, esperando respuesta…</div>
         </div>
       </div>
     </aside>

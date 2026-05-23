@@ -32,7 +32,78 @@
     modalRun: document.getElementById('freeTextRunBtn'),
     modalCancel: document.getElementById('freeTextCancelBtn'),
     modalCancelX: document.getElementById('freeTextCancel'),
+    filterTimeRange: document.getElementById('filterTimeRange'),
+    filterThreshold: document.getElementById('filterThreshold'),
+    filterThresholdGroup: document.getElementById('filterThresholdGroup'),
+    filterHint: document.getElementById('filterHint'),
+    connStatus: document.getElementById('connStatus'),
   };
+
+  // -------------------------------------------------------------------------
+  // Filter bar — gestiona valores actuales y visibilidad del threshold
+  // -------------------------------------------------------------------------
+  function readFilters() {
+    return {
+      time_range_hours: parseInt(el.filterTimeRange.value, 10),
+      failed_threshold: parseInt(el.filterThreshold.value, 10),
+    };
+  }
+  function updateFilterHint() {
+    const f = readFilters();
+    el.filterHint.textContent =
+      `Filtros activos: ${f.time_range_hours}h` +
+      (el.filterThresholdGroup.hidden ? '' : ` · umbral ${f.failed_threshold}`);
+  }
+  [el.filterTimeRange, el.filterThreshold].forEach(s => {
+    s.addEventListener('change', () => {
+      markCardsAsUsingFilters();
+      updateFilterHint();
+    });
+  });
+
+  function markCardsAsUsingFilters() {
+    const f = readFilters();
+    const isDefault = f.time_range_hours === 24 && f.failed_threshold === 5;
+    el.cards.querySelectorAll('.ecp-card').forEach(c => {
+      const accepts = (c.dataset.acceptsFilters || '').split(',').filter(Boolean);
+      c.dataset.filterActive = (!isDefault && accepts.length > 0) ? 'true' : 'false';
+    });
+  }
+  // Inicial
+  updateFilterHint();
+  markCardsAsUsingFilters();
+
+  // -------------------------------------------------------------------------
+  // Connection status — poll /healthz cada 15s
+  // -------------------------------------------------------------------------
+  function setConnPill(svc, state) {
+    const pill = el.connStatus.querySelector(`[data-svc="${svc}"]`);
+    if (pill) pill.setAttribute('data-state', state);
+  }
+  function initConnStatus() {
+    ['foundry', 'awx', 'teams'].forEach(s => setConnPill(s, 'unknown'));
+  }
+  async function pollHealth() {
+    try {
+      const r = await fetch('/healthz');
+      if (r.ok) {
+        // El dashboard sirviendo /healthz no garantiza que Foundry/AWX/Teams estén
+        // OK — pero al menos confirma que el bridge respira. Marcamos como ok
+        // optimisticamente; en errores de run los pills se ponen warn/error.
+        setConnPill('foundry', 'ok');
+        setConnPill('awx', 'ok');
+        setConnPill('teams', 'warn'); // sospechoso por la migracion a Workflows
+      } else {
+        setConnPill('foundry', 'error');
+      }
+    } catch {
+      setConnPill('foundry', 'error');
+      setConnPill('awx', 'error');
+    }
+  }
+  initConnStatus();
+  pollHealth();
+  setInterval(pollHealth, 15000);
 
   // -------------------------------------------------------------------------
   // Card click handler
@@ -46,10 +117,18 @@
     const renderer = card.dataset.renderer;
     const freeText = card.dataset.freeText === 'true';
 
+    // Determinar qué filtros aplican a esta card
+    const acceptsFilters = (card.dataset.acceptsFilters || '').split(',').filter(Boolean);
+    const allFilters = readFilters();
+    const filters = {};
+    acceptsFilters.forEach(f => {
+      if (allFilters[f] != null) filters[f] = allFilters[f];
+    });
+
     if (freeText) {
       openFreeTextModal(card, sid, renderer);
     } else {
-      runScenario(card, sid, renderer, null);
+      runScenario(card, sid, renderer, null, filters);
     }
   });
 
@@ -80,13 +159,13 @@
       return;
     }
     closeFreeTextModal();
-    runScenario(state._pendingCard, state._pendingSid, state._pendingRenderer, txt);
+    runScenario(state._pendingCard, state._pendingSid, state._pendingRenderer, txt, {});
   });
 
   // -------------------------------------------------------------------------
   // Run scenario
   // -------------------------------------------------------------------------
-  async function runScenario(card, scenarioId, renderer, freeText) {
+  async function runScenario(card, scenarioId, renderer, freeText, filters) {
     if (state.activeRunId) {
       alert('Hay un escenario en ejecución. Espera a que termine o cierra el panel.');
       return;
@@ -103,7 +182,13 @@
     el.panel.style.display = 'flex';
     el.panelTitle.textContent = card.querySelector('.ecp-card__title').textContent;
     el.timeline.innerHTML = '';
-    el.result.innerHTML = '<div class="ecp-result__empty">Esperando primer evento del agente…</div>';
+    el.result.innerHTML = `
+      <div class="ecp-result__empty">
+        <span class="ecp-result__empty-icon">🤖</span>
+        <div class="ecp-result__empty-text">El agente está trabajando<span class="ecp-loading-dots"></span></div>
+        <div class="ecp-result__empty-sub">Filtros: ${formatFiltersForDisplay(filters)}</div>
+      </div>
+    `;
 
     state.startTime = Date.now();
     startElapsedTimer();
@@ -117,6 +202,7 @@
           scenario_id: scenarioId,
           free_text: freeText,
           mock: state.forceMockUrlParam,
+          filters: filters || {},
         }),
       });
     } catch (err) {
@@ -223,7 +309,16 @@
 
   function updateOrAppendPolling(evt) {
     let pollNode = el.timeline.querySelector(`.poll-${evt.job_id}`);
-    const text = `AWX polling — job <code>${evt.job_id}</code> status=<strong>${evt.status}</strong> (${evt.elapsed_seconds}s)`;
+    // Estimacion visual: la mayoria de jobs duran 10-15s
+    const expected = 15;
+    const pct = Math.min(95, (evt.elapsed_seconds / expected) * 100);
+    const isRunning = evt.status === 'running' || evt.status === 'pending' || evt.status === 'waiting';
+    const barClass = isRunning ? 'ecp-awx-progress__bar--animated' : '';
+    const text = `
+      AWX polling — job <code>${evt.job_id}</code> · estado <strong>${evt.status}</strong> (${evt.elapsed_seconds}s)
+      <div class="ecp-awx-progress">
+        <div class="ecp-awx-progress__bar ${barClass}" style="width: ${pct}%;"></div>
+      </div>`;
     if (pollNode) {
       pollNode.querySelector('.ecp-timeline__text').innerHTML = text;
     } else {
@@ -232,6 +327,14 @@
       el.timeline.appendChild(node);
       autoscrollTimeline();
     }
+  }
+
+  function formatFiltersForDisplay(filters) {
+    if (!filters || Object.keys(filters).length === 0) return 'defaults';
+    const parts = [];
+    if (filters.time_range_hours != null) parts.push(`${filters.time_range_hours}h`);
+    if (filters.failed_threshold != null) parts.push(`umbral ${filters.failed_threshold}`);
+    return parts.join(' · ');
   }
 
   // -------------------------------------------------------------------------

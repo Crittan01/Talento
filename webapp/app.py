@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from . import bridge_runner, mock_events
 from .event_bus import bus
-from .scenarios import list_scenarios, resolve_prompt, get_scenario
+from .scenarios import list_scenarios, resolve_prompt, get_scenario, get_default_filters
 
 
 BASE_DIR = Path(__file__).parent
@@ -49,6 +49,7 @@ class RunRequest(BaseModel):
     scenario_id: str
     free_text: Optional[str] = None
     mock: bool = False
+    filters: Optional[dict] = None  # ej. {"time_range_hours": 4, "failed_threshold": 10}
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,11 @@ async def healthz():
 
 @app.get("/api/scenarios")
 async def api_scenarios():
-    return {"scenarios": list_scenarios(), "force_mock": _force_mock()}
+    return {
+        "scenarios": list_scenarios(),
+        "force_mock": _force_mock(),
+        "default_filters": get_default_filters(),
+    }
 
 
 @app.post("/api/run")
@@ -91,8 +96,12 @@ async def api_run(payload: RunRequest):
         run_id = await bridge_runner.start_mock_run(payload.scenario_id, mock_events)
         return {"run_id": run_id, "mode": "mock"}
 
-    # Modo real: resuelve prompt y lanza el bridge
-    prompt = resolve_prompt(payload.scenario_id, payload.free_text)
+    # Modo real: resuelve prompt con filtros y lanza el bridge
+    prompt = resolve_prompt(
+        payload.scenario_id,
+        free_text=payload.free_text,
+        filters=payload.filters,
+    )
     if not prompt:
         raise HTTPException(400, "Pregunta vacia (free_text requerido para free-text)")
 
