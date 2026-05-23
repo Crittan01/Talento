@@ -161,6 +161,9 @@ def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
         extra_vars.setdefault("azure_client_id", ENV.get("AZURE_CLIENT_ID", ""))
         extra_vars.setdefault("azure_client_secret", ENV.get("AZURE_CLIENT_SECRET", ""))
         extra_vars.setdefault("log_analytics_workspace_id", ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""))
+        # Teams webhook para adaptive card al final del playbook (opcional)
+        if ENV.get("TEAMS_WEBHOOK_URL"):
+            extra_vars.setdefault("teams_webhook_url", ENV["TEAMS_WEBHOOK_URL"])
 
     # Launch
     launch_resp = requests.post(

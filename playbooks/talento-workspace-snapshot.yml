@@ -26,6 +26,7 @@
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
     client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
     workspace_id: "{{ log_analytics_workspace_id | default(lookup('env', 'LOG_ANALYTICS_WORKSPACE_ID')) }}"
+    teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
 
   tasks:
     - name: Validar variables requeridas
@@ -140,3 +141,68 @@
           - "Esquema columnas: {{ schema_response.json.tables[0].rows | default([]) | length }}"
           - "Muestra de eventos: {{ sample_response.json.tables[0].rows | default([]) | length }}"
           - "Todas las tablas: {{ all_tables_summary }}"
+
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_webhook_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ 'good' if n_tables_with_data | int > 0 else 'warning' }}"
+                    items:
+                      - type: TextBlock
+                        text: "📊 TALENTO Workspace Snapshot"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "Ejecutado por talento-triage-agent vía AWX"
+                        isSubtle: true
+                        spacing: None
+                  - type: FactSet
+                    facts:
+                      - title: "Rango analizado"
+                        value: "{{ time_range_hours }} horas"
+                      - title: "Tablas con datos"
+                        value: "{{ n_tables_with_data }}"
+                      - title: "Tabla más activa"
+                        value: "{{ top_table_name }}"
+                      - title: "Filas en top tabla"
+                        value: "{{ top_table_rows }}"
+                      - title: "Columnas del schema"
+                        value: "{{ schema_response.json.tables[0].rows | default([]) | length }}"
+                      - title: "Muestra recuperada"
+                        value: "{{ sample_response.json.tables[0].rows | default([]) | length }} eventos"
+                  - type: TextBlock
+                    text: "Resumen de tablas"
+                    weight: Bolder
+                    spacing: Medium
+                  - type: TextBlock
+                    text: "{% for t in all_tables_summary %}• **{{ t[0] }}**: {{ t[1] }} filas\n{% endfor %}"
+                    wrap: true
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_webhook_url | length > 0
+      register: teams_notification
+      failed_when: false
+
+    - name: Reportar resultado de la notificación Teams
+      ansible.builtin.debug:
+        msg: >-
+          {% if teams_webhook_url | length == 0 %}
+          Teams webhook no configurado — skip notificación.
+          {% elif teams_notification.status | default(0) in [200, 202] %}
+          ✓ Adaptive card enviada a Teams (HTTP {{ teams_notification.status }}).
+          {% else %}
+          ⚠ Fallo notificación Teams (status {{ teams_notification.status | default('?') }}).
+          {% endif %}
