@@ -77,13 +77,22 @@ DEMO_QUESTIONS = {
         "criticos, que containers estan afectados, y cuales son los top "
         "mensajes recurrentes. Indica el nivel de severidad global."
     ),
+    "5": (
+        "TALENTO es un sistema regulado por SOX. Necesito una auditoria de "
+        "actividad de las ultimas 24 horas: que usuarios han accedido, que "
+        "acciones privilegiadas se ejecutaron (aprobaciones, rol=LIDER, "
+        "consultas masivas), y si hay incidentes de seguridad a nivel BD "
+        "(failed logins SQL, exceptions). Ejecuta el job template 50 "
+        "(talento-sox-audit) y reporta los hallazgos con el audit_status."
+    ),
 }
 
 # Templates AWX que requieren credenciales Azure inyectadas como extra_vars
 # (porque AWX no nos deja crear custom credential types sin superuser).
 # 48 = talento-workspace-snapshot
 # 49 = talento-errors-analysis
-TEMPLATES_NEEDING_AZURE_CREDS = {48, 49}
+# 50 = talento-sox-audit
+TEMPLATES_NEEDING_AZURE_CREDS = {48, 49, 50}
 DEFAULT_QUESTION_KEY = "1"
 
 
@@ -170,6 +179,8 @@ def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
         extra_vars.setdefault("azure_client_id", ENV.get("AZURE_CLIENT_ID", ""))
         extra_vars.setdefault("azure_client_secret", ENV.get("AZURE_CLIENT_SECRET", ""))
         extra_vars.setdefault("log_analytics_workspace_id", ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""))
+        # Default time_range si el agente no lo pasa (evita recursion en defaults Jinja)
+        extra_vars.setdefault("time_range_hours", 24)
         # Teams webhook para adaptive card al final del playbook (opcional)
         if ENV.get("TEAMS_WEBHOOK_URL"):
             extra_vars.setdefault("teams_webhook_url", ENV["TEAMS_WEBHOOK_URL"])
@@ -247,17 +258,21 @@ SYSTEM_INSTRUCTIONS = (
     "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
     "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
     "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un job "
-    "   template en AWX. Para ACCIONES operativas: snapshots, analisis de "
-    "   errores, remediaciones, smoke tests. Templates HOY:\n"
+    "   template en AWX. Para ACCIONES operativas. Templates HOY:\n"
     "   - id=47 talento-smoke-test (hello world, sin efecto real)\n"
-    "   - id=48 talento-workspace-snapshot (inventario amplio del workspace: "
-    "     tablas pobladas + schema + muestra. Para preguntas tipo 'que hay'). "
-    "     extra_vars opcional: {\"time_range_hours\": <int>} default 24.\n"
-    "   - id=49 talento-errors-analysis (FOCO en ERROR y WARN: clasifica "
-    "     severidad, top 5 mensajes, containers afectados, severity_status "
-    "     CRITICAL/WARN/OK. Para preguntas tipo 'que problemas tenemos'). "
-    "     extra_vars opcional: {\"time_range_hours\": <int>} default 24.\n"
-    "   Ambos 48 y 49 envian adaptive card a Teams automaticamente.\n\n"
+    "   - id=48 talento-workspace-snapshot (inventario amplio: tablas + "
+    "     schema + muestra. Para 'que hay en los logs').\n"
+    "   - id=49 talento-errors-analysis (FOCO en ERROR/WARN: severidad, top "
+    "     mensajes, containers afectados. Para 'que problemas tenemos').\n"
+    "   - id=50 talento-sox-audit (FOCO en SOX/seguridad: logins por usuario, "
+    "     acciones privilegiadas con rol, incidentes de seguridad a nivel BD. "
+    "     Para 'auditoria de accesos', 'quien hizo que', 'cumplimiento SOX', "
+    "     'actividad sospechosa'). Devuelve audit_status SECURITY_INCIDENT/"
+    "     AUDIT_REVIEW/NORMAL.\n"
+    "   Todos los JTs 48, 49 y 50 envian adaptive card a Teams "
+    "   automaticamente (color segun severidad).\n"
+    "   extra_vars opcional para 48/49/50: {\"time_range_hours\": <int>} "
+    "   default 24.\n\n"
     "PROTOCOLO:\n"
     "A) Para preguntas operativas: primero descubrimiento con "
     "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
@@ -320,7 +335,8 @@ TOOL_RUN_AWX = FunctionTool(
                     "ID del job template. Disponibles: "
                     "47 (talento-smoke-test, hello world), "
                     "48 (talento-workspace-snapshot, inventario amplio), "
-                    "49 (talento-errors-analysis, foco en ERROR/WARN)."
+                    "49 (talento-errors-analysis, foco en ERROR/WARN), "
+                    "50 (talento-sox-audit, foco en SOX/accesos/auditoria)."
                 ),
             },
             "extra_vars_json": {
