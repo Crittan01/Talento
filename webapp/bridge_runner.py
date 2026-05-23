@@ -55,12 +55,18 @@ async def start_run(
     user_question: str,
     no_setup: bool = True,
     max_hops: int = 4,
+    force_extra_vars: Optional[dict] = None,
 ) -> str:
     """Lanza un run del bridge en un thread worker. Devuelve run_id.
 
     El caller usa run_id para conectarse a /api/run/{run_id}/stream y recibir
     los eventos SSE. El thread worker termina cuando run_cycle termina o
     fallaba.
+
+    force_extra_vars: dict de valores que el bridge inyectara en CADA
+    llamada a run_awx_job_template, sobrescribiendo lo que el LLM proponga.
+    Esto garantiza que los filtros de la UI sean la fuente de verdad,
+    incluso si el modelo ignora el prompt.
     """
     loop = asyncio.get_running_loop()
     run_id = bus.register(loop)
@@ -96,6 +102,7 @@ async def start_run(
                 user_question=user_question,
                 max_hops=max_hops,
                 emit=emit,
+                force_extra_vars=force_extra_vars,
             )
         except Exception as exc:
             emit({

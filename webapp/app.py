@@ -105,10 +105,15 @@ async def api_run(payload: RunRequest):
     if not prompt:
         raise HTTPException(400, "Pregunta vacia (free_text requerido para free-text)")
 
+    # Los filtros del UI se pasan tambien como force_extra_vars para que el
+    # bridge los aplique en cada llamada a AWX, sobrescribiendo lo que el LLM
+    # proponga. Esto garantiza que el filtro elegido en la UI llega 100% a
+    # AWX aunque el modelo no respete el prompt al pie de la letra.
     run_id = await bridge_runner.start_run(
         user_question=prompt,
         no_setup=True,
         max_hops=4,
+        force_extra_vars=payload.filters or None,
     )
     return {"run_id": run_id, "mode": "real"}
 

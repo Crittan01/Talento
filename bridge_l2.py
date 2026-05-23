@@ -183,14 +183,22 @@ def run_awx_job_template(
     template_id: int,
     extra_vars: dict = None,
     emit: Optional[Callable[[dict], None]] = None,
+    force_extra_vars: dict = None,
 ) -> dict:
     """Lanza un job template en AWX, polea hasta completar, devuelve resultado.
     Inyecta automaticamente las Azure creds como extra_vars si el template
     las requiere (ver TEMPLATES_NEEDING_AZURE_CREDS).
+    force_extra_vars: dict de valores que SOBRESCRIBEN lo que el LLM paso.
+    Util para que la UI (filtros del usuario) sea la fuente de verdad sin
+    depender de que el modelo respete el prompt al pie de la letra.
     Si emit esta definido, emite eventos de polling para SSE."""
     base = ENV["AWX_URL"].rstrip("/")
     headers = {"Authorization": f"Bearer {ENV['AWX_TOKEN']}"}
     extra_vars = dict(extra_vars or {})
+
+    # Sobrescribir lo que el LLM paso con los valores forzados (filtros UI)
+    if force_extra_vars:
+        extra_vars.update(force_extra_vars)
 
     # Inyectar creds Azure si el JT lo requiere (workaround por falta de
     # superuser en AWX que impide crear custom credential types)
@@ -199,7 +207,7 @@ def run_awx_job_template(
         extra_vars.setdefault("azure_client_id", ENV.get("AZURE_CLIENT_ID", ""))
         extra_vars.setdefault("azure_client_secret", ENV.get("AZURE_CLIENT_SECRET", ""))
         extra_vars.setdefault("log_analytics_workspace_id", ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""))
-        # Default time_range si el agente no lo pasa (evita recursion en defaults Jinja)
+        # Default time_range si NI el LLM NI force_extra_vars lo trajeron
         extra_vars.setdefault("time_range_hours", 24)
         # Teams webhook para adaptive card al final del playbook (opcional)
         if ENV.get("TEAMS_WEBHOOK_URL"):
@@ -418,6 +426,7 @@ def process_response_items(
     response,
     hop: int,
     emit: Optional[Callable[[dict], None]] = None,
+    force_extra_vars: dict = None,
 ):
     text_chunks = []
     fn_outputs = []
@@ -467,15 +476,22 @@ def process_response_items(
                     ev = json.loads(ev_raw) if ev_raw and ev_raw.strip() else {}
                 except json.JSONDecodeError:
                     ev = {}
-                print(f"     AWX template_id={tpl}  extra_vars={ev}")
+                # Si hay filtros forzados del usuario, anunciarlo en el log
+                # para que sea visible en el timeline
+                effective_ev = dict(ev)
+                if force_extra_vars:
+                    effective_ev.update(force_extra_vars)
+                print(f"     AWX template_id={tpl}  extra_vars(efectivo)={effective_ev}")
                 _emit(emit, {
                     "type": "tool.call",
                     "hop": hop,
                     "tool": "run_awx_job_template",
-                    "args": {"template_id": tpl, "extra_vars": ev},
+                    "args": {"template_id": tpl, "extra_vars": effective_ev},
                 })
                 t0 = time.time()
-                result = run_awx_job_template(tpl, extra_vars=ev, emit=emit)
+                result = run_awx_job_template(
+                    tpl, extra_vars=ev, emit=emit, force_extra_vars=force_extra_vars,
+                )
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  AWX ERROR ({elapsed:.1f}s): {result['error']}")
@@ -518,6 +534,7 @@ def run_cycle(
     user_question,
     max_hops=8,
     emit: Optional[Callable[[dict], None]] = None,
+    force_extra_vars: dict = None,
 ):
     openai_client = project.get_openai_client()
     conversation = openai_client.conversations.create()
@@ -540,7 +557,9 @@ def run_cycle(
     final_text = ""
     for hop in range(1, max_hops + 1):
         _emit(emit, {"type": "agent.hop", "hop": hop})
-        text, fn_outputs = process_response_items(response, hop, emit=emit)
+        text, fn_outputs = process_response_items(
+            response, hop, emit=emit, force_extra_vars=force_extra_vars,
+        )
         if text:
             final_text = text
         if not fn_outputs:
