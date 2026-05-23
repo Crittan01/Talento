@@ -33,6 +33,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 import requests
 import urllib3
@@ -114,6 +115,19 @@ ENV = load_env(ENV_PATH)
 
 
 # ============================================================================
+# Emit helper — para webapp/SSE, no afecta CLI
+# ============================================================================
+def _emit(emit: Optional[Callable[[dict], None]], event: dict) -> None:
+    """Llama emit(event) si esta definido. No-op si emit is None (modo CLI)."""
+    if emit is not None:
+        try:
+            emit(event)
+        except Exception:
+            # No bloqueamos el bridge por fallo del emit (e.g., queue cerrada)
+            pass
+
+
+# ============================================================================
 # Tool 1: Log Analytics (heredado de L1)
 # ============================================================================
 def get_la_token() -> str:
@@ -164,10 +178,15 @@ def execute_kql(query: str) -> dict:
 # ============================================================================
 # Tool 2: AWX Job Template
 # ============================================================================
-def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
+def run_awx_job_template(
+    template_id: int,
+    extra_vars: dict = None,
+    emit: Optional[Callable[[dict], None]] = None,
+) -> dict:
     """Lanza un job template en AWX, polea hasta completar, devuelve resultado.
     Inyecta automaticamente las Azure creds como extra_vars si el template
-    las requiere (ver TEMPLATES_NEEDING_AZURE_CREDS)."""
+    las requiere (ver TEMPLATES_NEEDING_AZURE_CREDS).
+    Si emit esta definido, emite eventos de polling para SSE."""
     base = ENV["AWX_URL"].rstrip("/")
     headers = {"Authorization": f"Bearer {ENV['AWX_TOKEN']}"}
     extra_vars = dict(extra_vars or {})
@@ -204,8 +223,17 @@ def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
     if not job_id:
         return {"error": "Sin job_id en respuesta del launch", "details": launched}
 
+    awx_url = f"{base}/#/jobs/playbook/{job_id}"
+    _emit(emit, {
+        "type": "tool.awx.launched",
+        "template_id": template_id,
+        "job_id": job_id,
+        "awx_url": awx_url,
+    })
+
     # Poll status (max ~120s)
     final_job = None
+    poll_start = time.time()
     for attempt in range(40):
         time.sleep(3)
         s = requests.get(
@@ -217,10 +245,18 @@ def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
         if s.status_code != 200:
             continue
         job = s.json()
+        elapsed_polling = time.time() - poll_start
+        _emit(emit, {
+            "type": "tool.awx.polling",
+            "job_id": job_id,
+            "status": job.get("status"),
+            "elapsed_seconds": round(elapsed_polling, 1),
+        })
         if job["status"] in ("successful", "failed", "error", "canceled"):
             final_job = job
             break
     if final_job is None:
+        _emit(emit, {"type": "tool.awx.timeout", "job_id": job_id})
         return {"error": "Timeout (~120s) esperando job", "job_id": job_id}
 
     # Stdout (tail)
@@ -370,7 +406,11 @@ def setup_agent_version(project: AIProjectClient):
 # ============================================================================
 # Procesamiento de respuestas (multi-hop)
 # ============================================================================
-def process_response_items(response, hop: int):
+def process_response_items(
+    response,
+    hop: int,
+    emit: Optional[Callable[[dict], None]] = None,
+):
     text_chunks = []
     fn_outputs = []
     for item in response.output:
@@ -379,14 +419,33 @@ def process_response_items(response, hop: int):
             args = json.loads(item.arguments)
             print(f"\n  🤖 hop {hop} → llama tool: {item.name}")
             if item.name == "query_log_analytics":
-                print(f"     KQL: {args.get('query', '')}")
+                kql = args.get("query", "")
+                print(f"     KQL: {kql}")
+                _emit(emit, {
+                    "type": "tool.call",
+                    "hop": hop,
+                    "tool": "query_log_analytics",
+                    "args": {"query": kql},
+                })
                 t0 = time.time()
                 result = execute_kql(args["query"])
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  KQL ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {
+                        "type": "tool.kql.error",
+                        "hop": hop,
+                        "error": result.get("error"),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
                 else:
                     print(f"     ✓ KQL OK ({elapsed:.1f}s): {result['rows']} filas")
+                    _emit(emit, {
+                        "type": "tool.kql.done",
+                        "hop": hop,
+                        "rows": result.get("rows", 0),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
@@ -401,14 +460,35 @@ def process_response_items(response, hop: int):
                 except json.JSONDecodeError:
                     ev = {}
                 print(f"     AWX template_id={tpl}  extra_vars={ev}")
+                _emit(emit, {
+                    "type": "tool.call",
+                    "hop": hop,
+                    "tool": "run_awx_job_template",
+                    "args": {"template_id": tpl, "extra_vars": ev},
+                })
                 t0 = time.time()
-                result = run_awx_job_template(tpl, extra_vars=ev)
+                result = run_awx_job_template(tpl, extra_vars=ev, emit=emit)
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  AWX ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {
+                        "type": "tool.awx.error",
+                        "hop": hop,
+                        "error": result.get("error"),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
                 else:
                     print(f"     ✓ AWX {result['status']} en {result.get('elapsed_seconds','?')}s")
                     print(f"       job_id={result['job_id']}  ({result.get('awx_url','')})")
+                    _emit(emit, {
+                        "type": "tool.awx.done",
+                        "hop": hop,
+                        "job_id": result.get("job_id"),
+                        "status": result.get("status"),
+                        "elapsed_seconds": result.get("elapsed_seconds"),
+                        "awx_url": result.get("awx_url"),
+                        "artifacts": result.get("artifacts", {}),
+                    })
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
@@ -424,11 +504,23 @@ def process_response_items(response, hop: int):
     return "\n".join(text_chunks), fn_outputs
 
 
-def run_cycle(project, agent_name, user_question, max_hops=8):
+def run_cycle(
+    project,
+    agent_name,
+    user_question,
+    max_hops=8,
+    emit: Optional[Callable[[dict], None]] = None,
+):
     openai_client = project.get_openai_client()
     conversation = openai_client.conversations.create()
 
     print(f"\n  👤 Usuario: {user_question}")
+    _emit(emit, {
+        "type": "agent.received",
+        "question": user_question,
+        "agent": agent_name,
+        "max_hops": max_hops,
+    })
     t_total = time.time()
 
     response = openai_client.responses.create(
@@ -439,7 +531,8 @@ def run_cycle(project, agent_name, user_question, max_hops=8):
 
     final_text = ""
     for hop in range(1, max_hops + 1):
-        text, fn_outputs = process_response_items(response, hop)
+        _emit(emit, {"type": "agent.hop", "hop": hop})
+        text, fn_outputs = process_response_items(response, hop, emit=emit)
         if text:
             final_text = text
         if not fn_outputs:
@@ -451,6 +544,7 @@ def run_cycle(project, agent_name, user_question, max_hops=8):
         )
     else:
         print(f"\n  ⚠️  Limite de {max_hops} hops alcanzado.")
+        _emit(emit, {"type": "agent.hop_limit", "max_hops": max_hops})
 
     if not final_text:
         final_text = getattr(response, "output_text", "") or "[sin respuesta de texto]"
@@ -462,6 +556,12 @@ def run_cycle(project, agent_name, user_question, max_hops=8):
     print(final_text)
     print("═" * 78)
     print(f"  ⏱  Tiempo total: {elapsed:.1f}s")
+    _emit(emit, {
+        "type": "agent.final",
+        "text": final_text,
+        "elapsed_seconds": round(elapsed, 1),
+    })
+    _emit(emit, {"type": "done"})
 
 
 # ============================================================================
