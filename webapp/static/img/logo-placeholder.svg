@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Placeholder de logo Ecopetrol — uso interno solamente.
+  El logo real requiere autorizacion de Comunicaciones Ecopetrol
+  (catherine.villamil@ecopetrol.com.co). Reemplazar este archivo
+  con el SVG aprobado cuando este disponible.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 56" role="img" aria-label="ECOPETROL (placeholder)">
+  <rect x="0" y="0" width="56" height="56" rx="6" fill="#F7DB17"/>
+  <text x="28" y="38" font-family="Verdana, sans-serif" font-size="28" font-weight="700"
+        text-anchor="middle" fill="#004236">E</text>
+  <text x="68" y="36" font-family="Verdana, sans-serif" font-size="20" font-weight="700"
+        fill="#FFFFFF">ECOPETROL</text>
+  <text x="68" y="50" font-family="Verdana, sans-serif" font-size="9" fill="#CCD32A"
+        letter-spacing="2">DEMO INTERNO · NTT</text>
+</svg>

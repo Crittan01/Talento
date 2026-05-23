@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TALENTO — Centro de Mando IA</title>
+  <link rel="stylesheet" href="/static/css/ecp.css">
+  <link rel="icon" href="/static/img/logo-placeholder.svg" type="image/svg+xml">
+</head>
+<body>
+  <header class="ecp-header">
+    <img class="ecp-header__logo" src="/static/img/logo-placeholder.svg" alt="Ecopetrol (placeholder)">
+    <div class="ecp-header__titles">
+      <h1 class="ecp-header__h1">TALENTO — Centro de Mando IA</h1>
+      <h2 class="ecp-header__h2">Agente IA · AWX · Log Analytics · Microsoft Teams</h2>
+    </div>
+    <span class="ecp-badge">DEMO</span>
+  </header>
+
+  <div class="ecp-band">
+    <span>Caso Técnico 4.1 · Administración, Operación y Soporte de TALENTO · Powered by NTT DATA</span>
+    {% if force_mock %}
+    <span class="mock-flag">MODO MOCK ACTIVO</span>
+    {% endif %}
+  </div>
+
+  <main class="ecp-main ecp-main--no-panel" id="mainLayout">
+
+    <!-- ============ Cards de escenarios ============ -->
+    <section>
+      <div class="ecp-cards" id="cardsGrid">
+        {% for s in scenarios %}
+        <article class="ecp-card {{ s.card_class }}"
+                 data-scenario-id="{{ s.id }}"
+                 data-renderer="{{ s.renderer }}"
+                 data-free-text="{{ 'true' if s.free_text else 'false' }}">
+          <div class="ecp-card__spinner"></div>
+          <div class="ecp-card__icon">{{ s.icon }}</div>
+          <h3 class="ecp-card__title">{{ s.title }}</h3>
+          <p class="ecp-card__sub">{{ s.subtitle }}</p>
+          <p class="ecp-card__pain">{{ s.pain_point }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- ============ Panel derecho (slide-in) ============ -->
+    <aside class="ecp-panel" id="panel" style="display:none;">
+      <div class="ecp-panel__header">
+        <h3 id="panelTitle">Ejecutando…</h3>
+        <div>
+          <span class="ecp-panel__elapsed" id="panelElapsed">0.0s</span>
+          <button class="ecp-panel__close" id="panelClose" title="Cerrar">×</button>
+        </div>
+      </div>
+      <div class="ecp-timeline" id="timeline"></div>
+      <div class="ecp-result" id="result">
+        <div class="ecp-result__empty">
+          Esperando primer evento del agente…
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ============ Modal free-text ============ -->
+  <div class="ecp-modal-bg" id="freeTextModal">
+    <div class="ecp-modal">
+      <div class="ecp-modal__header">
+        <strong>Pregunta libre al agente</strong>
+        <button class="ecp-panel__close" id="freeTextCancel" title="Cerrar">×</button>
+      </div>
+      <div class="ecp-modal__body">
+        <p style="margin-top:0; color: var(--text-muted); font-size:12px;">
+          Escribe una pregunta operativa sobre TALENTO. El agente decidirá qué tool usar
+          (Log Analytics o AWX) según la pregunta.
+        </p>
+        <textarea id="freeTextInput"
+                  placeholder="Ej: ¿Cuántos eventos hubo en la última hora y de qué tabla provienen?"></textarea>
+      </div>
+      <div class="ecp-modal__footer">
+        <button class="ecp-btn ecp-btn--secondary" id="freeTextCancelBtn">Cancelar</button>
+        <button class="ecp-btn" id="freeTextRunBtn">Ejecutar</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="ecp-footer">
+    <strong>Ecopetrol S.A.</strong> · Demo interna de capacidades agentic AI · NTT DATA · 2026
+    <br>
+    <span style="color: var(--ecp-gray); font-size:10px;">
+      Logo y marca Ecopetrol son propiedad de Ecopetrol S.A. Este dashboard es un demo interno NTT
+      y reemplazará el placeholder con el logo aprobado por Comunicaciones Corporativas.
+    </span>
+  </footer>
+
+  <script src="/static/js/renderers.js"></script>
+  <script src="/static/js/ecp.js"></script>
+</body>
+</html>
