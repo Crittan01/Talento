@@ -73,9 +73,11 @@ async def start_run(
             from azure.identity import DefaultAzureCredential
 
             emit({"type": "agent.connecting"})
+            # exclude_environment_credential=True: usar az login (usuario con
+            # acceso a Foundry), no el SP del .env (que solo tiene LA Reader).
             project = AIProjectClient(
                 endpoint=bridge_l2.PROJECT_ENDPOINT,
-                credential=DefaultAzureCredential(),
+                credential=DefaultAzureCredential(exclude_environment_credential=True),
             )
             agent_name = bridge_l2.AGENT_NAME
             if not no_setup:

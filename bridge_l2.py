@@ -93,7 +93,8 @@ DEMO_QUESTIONS = {
 # 48 = talento-workspace-snapshot
 # 49 = talento-errors-analysis
 # 50 = talento-sox-audit
-TEMPLATES_NEEDING_AZURE_CREDS = {48, 49, 50}
+# 51 = talento-brute-force-detector
+TEMPLATES_NEEDING_AZURE_CREDS = {48, 49, 50, 51}
 DEFAULT_QUESTION_KEY = "1"
 
 
@@ -305,9 +306,15 @@ SYSTEM_INSTRUCTIONS = (
     "     Para 'auditoria de accesos', 'quien hizo que', 'cumplimiento SOX', "
     "     'actividad sospechosa'). Devuelve audit_status SECURITY_INCIDENT/"
     "     AUDIT_REVIEW/NORMAL.\n"
-    "   Todos los JTs 48, 49 y 50 envian adaptive card a Teams "
+    "   - id=51 talento-brute-force-detector (FOCO en patrones de brute "
+    "     force: failed logins agrupados por usuario con umbral. Para "
+    "     'detectar brute force', 'intentos de login fallidos', 'ataques de "
+    "     fuerza bruta'). Devuelve bruteforce_severity HIGH/MEDIUM/LOW. "
+    "     extra_vars opcionales: {\"time_range_hours\": <int>, "
+    "     \"failed_threshold\": <int>}.\n"
+    "   Todos los JTs 48, 49, 50 y 51 envian adaptive card a Teams "
     "   automaticamente (color segun severidad).\n"
-    "   extra_vars opcional para 48/49/50: {\"time_range_hours\": <int>} "
+    "   extra_vars opcional para 48/49/50/51: {\"time_range_hours\": <int>} "
     "   default 24.\n\n"
     "PROTOCOLO:\n"
     "A) Para preguntas operativas: primero descubrimiento con "
@@ -372,7 +379,8 @@ TOOL_RUN_AWX = FunctionTool(
                     "47 (talento-smoke-test, hello world), "
                     "48 (talento-workspace-snapshot, inventario amplio), "
                     "49 (talento-errors-analysis, foco en ERROR/WARN), "
-                    "50 (talento-sox-audit, foco en SOX/accesos/auditoria)."
+                    "50 (talento-sox-audit, foco en SOX/accesos/auditoria), "
+                    "51 (talento-brute-force-detector, foco en intentos de login fallidos)."
                 ),
             },
             "extra_vars_json": {
@@ -589,9 +597,14 @@ def main():
     print("└" + "─" * 76 + "┘")
 
     print("\n► Conectando a Foundry...")
+    # Importante: exclude_environment_credential=True fuerza a usar el az login
+    # del usuario. Si no se excluye, DefaultAzureCredential toma las vars
+    # AZURE_CLIENT_ID/SECRET/TENANT_ID del .env y las usa como SP — pero ese
+    # SP solo tiene rol Log Analytics Reader, no tiene acceso a Foundry. El
+    # usuario que hizo `az login` SÍ tiene acceso a Foundry.
     project = AIProjectClient(
         endpoint=PROJECT_ENDPOINT,
-        credential=DefaultAzureCredential(),
+        credential=DefaultAzureCredential(exclude_environment_credential=True),
     )
 
     agent_name = AGENT_NAME
