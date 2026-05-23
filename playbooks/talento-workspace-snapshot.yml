@@ -1,27 +1,26 @@
 ---
 # talento-workspace-snapshot.yml
 #
-# Snapshot diagnostico no-invasivo del workspace de Log Analytics de TALENTO.
+# Snapshot diagnostico NO INVASIVO del workspace de Log Analytics de TALENTO.
 # Disenado para ser invocado desde el agente de Foundry como una accion
 # de "recuperar contexto operativo" auditada via AWX.
 #
 # Parametros (extra_vars):
 #   time_range_hours: rango de horas a inspeccionar (default 24)
+#   azure_tenant_id, azure_client_id, azure_client_secret, log_analytics_workspace_id:
+#     credenciales inyectadas por el bridge si el playbook se ejecuta en AWX.
+#     Si no se pasan, fallback a env vars (uso local).
 #
-# Salida (artifacts via set_stats):
-#   - tables_populated: lista de tablas con datos en el rango
-#   - schemas: esquemas de las 2 tablas mas pobladas
-#   - sample_events: ultimas filas de la tabla mas poblada
-#
-# Credenciales (desde el entorno del Job Template):
-#   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, LOG_ANALYTICS_WORKSPACE_ID
+# Salida:
+#   - set_stats: snapshot_timestamp, time_range_hours, n_tables_with_data,
+#                top_table_name, top_table_rows, schema_cols, sample_count
+#   - debug: resumen humano-legible al final de stdout
 
 - name: Talento workspace snapshot — diagnostico no invasivo
   hosts: localhost
   gather_facts: false
 
   vars:
-    # extra_vars desde launch tienen precedencia, fallback a env vars (uso local)
     time_range_hours: "{{ time_range_hours | default(24) }}"
     tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
@@ -36,7 +35,7 @@
           - client_id | length > 0
           - client_secret | length > 0
           - workspace_id | length > 0
-        fail_msg: "Faltan variables de entorno (AZURE_TENANT_ID / CLIENT_ID / CLIENT_SECRET / LOG_ANALYTICS_WORKSPACE_ID)"
+        fail_msg: "Faltan variables (azure_*) — pasalas como extra_vars o env."
 
     - name: Obtener token OAuth2 para Log Analytics
       ansible.builtin.uri:
@@ -61,7 +60,7 @@
         la_token: "{{ token_response.json.access_token }}"
       no_log: true
 
-    - name: Descubrir tablas con datos en el rango {{ time_range_hours }}h
+    - name: Descubrir tablas pobladas en el rango {{ time_range_hours }}h
       ansible.builtin.uri:
         url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
         method: POST
@@ -80,20 +79,12 @@
         timeout: 60
       register: tables_query
 
-    - name: Extraer lista de tablas pobladas
+    - name: Extraer info de la tabla con mas datos
       ansible.builtin.set_fact:
-        tables_populated: >-
-          {{
-            tables_query.json.tables[0].rows
-            | map('zip', tables_query.json.tables[0].columns | map(attribute='name'))
-            | map('map', 'reverse')
-            | map('community.general.dict')
-            | list
-          }}
-
-    - name: Mostrar tablas encontradas
-      ansible.builtin.debug:
-        msg: "Tablas con datos en {{ time_range_hours }}h: {{ tables_populated | length }}"
+        n_tables_with_data: "{{ tables_query.json.tables[0].rows | length }}"
+        top_table_name: "{{ (tables_query.json.tables[0].rows | first | default(['none', 0]))[0] }}"
+        top_table_rows: "{{ (tables_query.json.tables[0].rows | first | default(['none', 0]))[1] }}"
+        all_tables_summary: "{{ tables_query.json.tables[0].rows | default([]) }}"
 
     - name: Obtener esquema de la tabla mas poblada
       ansible.builtin.uri:
@@ -104,14 +95,14 @@
           Content-Type: "application/json"
         body_format: json
         body:
-          query: "{{ tables_populated[0].Tabla }} | getschema"
+          query: "{{ top_table_name }} | getschema"
         return_content: true
         status_code: 200
         timeout: 60
-      register: top_table_schema
-      when: tables_populated | length > 0
+      register: schema_response
+      when: top_table_name != 'none'
 
-    - name: Obtener muestra de eventos de la tabla mas poblada
+    - name: Obtener muestra de la tabla mas poblada
       ansible.builtin.uri:
         url: "https://api.loganalytics.azure.com/v1/workspaces/{{ workspace_id }}/query"
         method: POST
@@ -120,31 +111,32 @@
           Content-Type: "application/json"
         body_format: json
         body:
-          query: "{{ tables_populated[0].Tabla }} | where TimeGenerated > ago({{ time_range_hours }}h) | take 10"
+          query: "{{ top_table_name }} | where TimeGenerated > ago({{ time_range_hours }}h) | take 10"
         return_content: true
         status_code: 200
         timeout: 60
-      register: top_table_sample
-      when: tables_populated | length > 0
+      register: sample_response
+      when: top_table_name != 'none'
 
-    - name: Exponer resultados como artifacts (set_stats)
+    - name: Exportar resultados via set_stats
       ansible.builtin.set_stats:
         data:
-          snapshot_timestamp: "{{ ansible_date_time.iso8601 | default('') }}"
           time_range_hours: "{{ time_range_hours }}"
-          tables_populated: "{{ tables_populated | default([]) }}"
-          top_table: "{{ tables_populated[0].Tabla | default('none') }}"
-          top_table_rows: "{{ tables_populated[0].Registros | default(0) }}"
-          schema_columns: "{{ top_table_schema.json.tables[0].rows | default([]) | length }}"
-          sample_rows: "{{ top_table_sample.json.tables[0].rows | default([]) | length }}"
+          n_tables_with_data: "{{ n_tables_with_data }}"
+          top_table_name: "{{ top_table_name }}"
+          top_table_rows: "{{ top_table_rows }}"
+          all_tables_summary: "{{ all_tables_summary }}"
+          schema_cols: "{{ schema_response.json.tables[0].rows | default([]) | length }}"
+          sample_count: "{{ sample_response.json.tables[0].rows | default([]) | length }}"
         per_host: false
 
-    - name: Resumen para stdout
+    - name: Resumen humano-legible en stdout
       ansible.builtin.debug:
         msg:
           - "=== TALENTO WORKSPACE SNAPSHOT ==="
-          - "Rango: {{ time_range_hours }}h"
-          - "Tablas con datos: {{ tables_populated | length }}"
-          - "Top tabla: {{ tables_populated[0].Tabla | default('ninguna') }} ({{ tables_populated[0].Registros | default(0) }} filas)"
-          - "Esquema columnas: {{ top_table_schema.json.tables[0].rows | default([]) | length }}"
-          - "Muestra eventos: {{ top_table_sample.json.tables[0].rows | default([]) | length }}"
+          - "Rango: {{ time_range_hours }} horas"
+          - "Tablas pobladas: {{ n_tables_with_data }}"
+          - "Top tabla: {{ top_table_name }} ({{ top_table_rows }} filas)"
+          - "Esquema columnas: {{ schema_response.json.tables[0].rows | default([]) | length }}"
+          - "Muestra de eventos: {{ sample_response.json.tables[0].rows | default([]) | length }}"
+          - "Todas las tablas: {{ all_tables_summary }}"
