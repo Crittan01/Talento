@@ -61,11 +61,9 @@ DEMO_QUESTIONS = {
         "que tenemos via de remediacion disponible. Reporta los dos resultados."
     ),
     "2": (
-        "Detectaste antes que aci-centralecopetrol tiene errores de "
-        "Authentication failed en envio de correo. Si tuvieras un job template "
-        "AWX para reiniciar containers, lo lanzarias? Por ahora valida el "
-        "runtime con el smoke test (template_id=47) y explica que harias en "
-        "produccion."
+        "Ejecuta un snapshot completo del workspace de TALENTO via el job "
+        "template AWX talento-workspace-snapshot (template_id=48) con rango "
+        "de 24 horas. Cuando termine, sintetiza los hallazgos del snapshot."
     ),
     "3": (
         "Lanza el job template id 47 en AWX como prueba de cable agente <-> "
@@ -73,6 +71,10 @@ DEMO_QUESTIONS = {
         "stdout."
     ),
 }
+
+# Templates AWX que requieren credenciales Azure inyectadas como extra_vars
+# (porque AWX no nos deja crear custom credential types sin superuser)
+TEMPLATES_NEEDING_AZURE_CREDS = {48}
 DEFAULT_QUESTION_KEY = "1"
 
 
@@ -145,15 +147,26 @@ def execute_kql(query: str) -> dict:
 # Tool 2: AWX Job Template
 # ============================================================================
 def run_awx_job_template(template_id: int, extra_vars: dict = None) -> dict:
-    """Lanza un job template en AWX, polea hasta completar, devuelve resultado."""
+    """Lanza un job template en AWX, polea hasta completar, devuelve resultado.
+    Inyecta automaticamente las Azure creds como extra_vars si el template
+    las requiere (ver TEMPLATES_NEEDING_AZURE_CREDS)."""
     base = ENV["AWX_URL"].rstrip("/")
     headers = {"Authorization": f"Bearer {ENV['AWX_TOKEN']}"}
+    extra_vars = dict(extra_vars or {})
+
+    # Inyectar creds Azure si el JT lo requiere (workaround por falta de
+    # superuser en AWX que impide crear custom credential types)
+    if template_id in TEMPLATES_NEEDING_AZURE_CREDS:
+        extra_vars.setdefault("azure_tenant_id", ENV.get("AZURE_TENANT_ID", ""))
+        extra_vars.setdefault("azure_client_id", ENV.get("AZURE_CLIENT_ID", ""))
+        extra_vars.setdefault("azure_client_secret", ENV.get("AZURE_CLIENT_SECRET", ""))
+        extra_vars.setdefault("log_analytics_workspace_id", ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""))
 
     # Launch
     launch_resp = requests.post(
         f"{base}/api/v2/job_templates/{template_id}/launch/",
         headers={**headers, "Content-Type": "application/json"},
-        json={"extra_vars": extra_vars or {}},
+        json={"extra_vars": extra_vars},
         verify=False,
         timeout=30,
     )
@@ -221,10 +234,13 @@ SYSTEM_INSTRUCTIONS = (
     "Tienes DOS tools:\n\n"
     "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
     "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
-    "2. run_awx_job_template(template_id, extra_vars): ejecuta un job template "
-    "   en AWX (runtime de automatizacion). Para ACCIONES operativas, "
+    "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un job "
+    "   template en AWX (runtime de automatizacion). Para ACCIONES operativas, "
     "   snapshots, remediaciones, smoke tests. Templates disponibles HOY:\n"
-    "   - id=47 talento-smoke-test (hello world, sin efecto real)\n\n"
+    "   - id=47 talento-smoke-test (hello world, sin efecto real)\n"
+    "   - id=48 talento-workspace-snapshot (snapshot diagnostico no invasivo: "
+    "     descubre tablas pobladas, esquema de la principal, muestra de "
+    "     eventos. extra_vars opcional: {\"time_range_hours\": <int>} default 24)\n\n"
     "PROTOCOLO:\n"
     "A) Para preguntas operativas: primero descubrimiento con "
     "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
@@ -274,11 +290,9 @@ TOOL_QUERY_LA = FunctionTool(
 TOOL_RUN_AWX = FunctionTool(
     name="run_awx_job_template",
     description=(
-        "Lanza un Job Template en AWX (runtime de automatizacion) y espera "
-        "a que termine. Usala para EJECUTAR acciones operativas: smoke tests, "
-        "snapshots diagnosticos, remediaciones (cuando esten disponibles). "
-        "Devuelve job_id, status (successful/failed), elapsed_seconds y "
-        "stdout_tail del playbook."
+        "Lanza un Job Template en AWX y espera a que termine. Usala para "
+        "EJECUTAR acciones operativas: smoke tests, snapshots, remediaciones. "
+        "Devuelve job_id, status, elapsed_seconds, stdout_tail y artifacts."
     ),
     parameters={
         "type": "object",
@@ -286,12 +300,22 @@ TOOL_RUN_AWX = FunctionTool(
             "template_id": {
                 "type": "integer",
                 "description": (
-                    "ID del job template a lanzar. Disponibles hoy: 47 "
-                    "(talento-smoke-test, hello world sin efecto)."
+                    "ID del job template. Disponibles: "
+                    "47 (talento-smoke-test, hello world sin efecto), "
+                    "48 (talento-workspace-snapshot, snapshot diagnostico no invasivo)."
+                ),
+            },
+            "extra_vars_json": {
+                "type": "string",
+                "description": (
+                    "JSON string con variables extra opcionales. Para template "
+                    "48 puedes pasar '{\"time_range_hours\": 12}'. Si no aplica "
+                    "envia '{}'. NO incluyas credenciales aqui — el bridge las "
+                    "inyecta solo."
                 ),
             },
         },
-        "required": ["template_id"],
+        "required": ["template_id", "extra_vars_json"],
         "additionalProperties": False,
     },
     strict=True,
@@ -336,9 +360,15 @@ def process_response_items(response, hop: int):
                 })
             elif item.name == "run_awx_job_template":
                 tpl = args.get("template_id")
-                print(f"     AWX template_id={tpl}")
+                # extra_vars_json viene como string JSON desde el agente
+                ev_raw = args.get("extra_vars_json", "{}")
+                try:
+                    ev = json.loads(ev_raw) if ev_raw and ev_raw.strip() else {}
+                except json.JSONDecodeError:
+                    ev = {}
+                print(f"     AWX template_id={tpl}  extra_vars={ev}")
                 t0 = time.time()
-                result = run_awx_job_template(tpl)
+                result = run_awx_job_template(tpl, extra_vars=ev)
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  AWX ERROR ({elapsed:.1f}s): {result['error']}")
