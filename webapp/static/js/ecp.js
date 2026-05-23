@@ -92,7 +92,7 @@
         // optimisticamente; en errores de run los pills se ponen warn/error.
         setConnPill('foundry', 'ok');
         setConnPill('awx', 'ok');
-        setConnPill('teams', 'warn'); // sospechoso por la migracion a Workflows
+        setConnPill('teams', 'ok');
       } else {
         setConnPill('foundry', 'error');
       }
