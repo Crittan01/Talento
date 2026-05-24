@@ -214,6 +214,43 @@ talento-ecopetrol/
 └── group_vars/                     # pendiente: vars compartidas
 ```
 
+## Limitaciones conocidas
+
+### 1. Secrets visibles en `extra_vars` del job AWX
+
+Por la arquitectura actual del demo, las credenciales Azure (`azure_tenant_id`,
+`azure_client_id`, `azure_client_secret`, `log_analytics_workspace_id`) y la
+URL del webhook Teams se pasan como `extra_vars` al lanzar el Job Template.
+AWX **muestra esos `extra_vars` en claro** en la pestaña de detalle del job y
+los persiste en su base de datos. Esto es **diseño de AWX**, no bug del demo.
+
+**Mitigaciones activas hoy**:
+- `no_log: true` en las tasks que consumen el secret (token OAuth2) → no aparecen
+  en el `stdout` del job.
+- Filtro anti-leak `_scrub()` en [webapp/bridge_runner.py](webapp/bridge_runner.py)
+  → secrets no viajan a través del stream SSE al dashboard del browser.
+- `.env` con permisos `600` + presente en `.gitignore`.
+
+**Lo NO mitigable sin elevación de permisos**: el panel "Extra Variables" del job
+detail en AWX UI. Solo lo ven quienes tienen lectura del AWX.
+
+**Camino para producción**: el admin de AWX debe crear un **Custom Credential
+Type** `talento-azure-sp` con los campos como `secret: true`, que inyecte
+las variables al runner via env vars (no via extra_vars). El usuario actual
+`admin_ecopetrol` (id=3) NO es superuser y por eso no puede crear ese
+credential type. **Antes de pasar a producción esto es requisito**.
+
+### 2. Resolución DNS intermitente desde el EE de AWX
+
+Hosts externos (ej. `everisgroup.webhook.office.com`) ocasionalmente fallan
+con `Errno -2 Name or service not known` desde el pod del Execution
+Environment k3s. La task de notificación Teams en los 4 playbooks ahora
+tiene `retries: 3, delay: 3, until: status in [200,202]` + `ignore_errors`
+para tolerar este fallo intermitente sin romper el playbook completo.
+
+Si persiste, el admin del cluster k3s debe revisar la configuración de DNS
+del pod del EE (CoreDNS forwarders, `/etc/resolv.conf` del container, etc.).
+
 ## Recursos Azure usados (NTT DATA Colombia IS)
 
 | Recurso | Identificador |

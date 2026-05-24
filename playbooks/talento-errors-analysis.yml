@@ -228,7 +228,10 @@
         timeout: 15
       when: teams_webhook_url | length > 0
       register: teams_notification
-      failed_when: false
+      retries: 3
+      delay: 3
+      until: teams_notification.status | default(-1) in [200, 202]
+      ignore_errors: true
 
     - name: Reportar resultado notificación Teams
       ansible.builtin.debug:
