@@ -29,6 +29,7 @@ Referencias oficiales:
     https://ansible.readthedocs.io/projects/awx/en/latest/rest_api/api_ref.html
 """
 
+import hashlib
 import json
 import sys
 import time
@@ -50,56 +51,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============================================================================
 PROJECT_ENDPOINT = "https://aifoundry-is2.services.ai.azure.com/api/projects/proj-foundry-is2"
 MODEL_DEPLOYMENT = "talento-gpt4o-mini"
-AGENT_NAME = "talento-triage-agent"
 
 ENV_PATH = Path(__file__).parent / ".env"
 
-DEMO_QUESTIONS = {
-    "1": (
-        "Realiza un health check operativo de TALENTO: primero diagnostica si "
-        "hay errores recientes en el workspace, luego ejecuta el smoke test "
-        "del runtime de automatizacion AWX (template_id=47) para verificar "
-        "que tenemos via de remediacion disponible. Reporta los dos resultados."
-    ),
-    "2": (
-        "Ejecuta un snapshot completo del workspace de TALENTO via el job "
-        "template AWX talento-workspace-snapshot (template_id=48) con rango "
-        "de 24 horas. Cuando termine, sintetiza los hallazgos del snapshot."
-    ),
-    "3": (
-        "Lanza el job template id 47 en AWX como prueba de cable agente <-> "
-        "runtime de automatizacion. Reporta job_id, status y resumen del "
-        "stdout."
-    ),
-    "4": (
-        "¿Tenemos errores o warnings significativos en TALENTO en las "
-        "ultimas 24 horas? Lanza el analisis especifico de errores via AWX "
-        "(template_id=49) y sintetiza los hallazgos: cuantos eventos "
-        "criticos, que containers estan afectados, y cuales son los top "
-        "mensajes recurrentes. Indica el nivel de severidad global."
-    ),
-    "5": (
-        "TALENTO es un sistema regulado por SOX. Necesito una auditoria de "
-        "actividad de las ultimas 24 horas: que usuarios han accedido, que "
-        "acciones privilegiadas se ejecutaron (aprobaciones, rol=LIDER, "
-        "consultas masivas), y si hay incidentes de seguridad a nivel BD "
-        "(failed logins SQL, exceptions). Ejecuta el job template 50 "
-        "(talento-sox-audit) y reporta los hallazgos con el audit_status."
-    ),
-}
-
-# Templates AWX que requieren credenciales Azure inyectadas como extra_vars
-# (porque AWX no nos deja crear custom credential types sin superuser).
-# 48 = talento-workspace-snapshot
-# 49 = talento-errors-analysis
-# 50 = talento-sox-audit
-# 51 = talento-brute-force-detector
-TEMPLATES_NEEDING_AZURE_CREDS = {48, 49, 50, 51}
-DEFAULT_QUESTION_KEY = "1"
-
 
 # ============================================================================
-# Carga del .env
+# Carga del .env (debe ir antes de derivar JT_IDS y AGENT_NAME)
 # ============================================================================
 def load_env(path: Path) -> dict:
     env = {}
@@ -113,6 +70,70 @@ def load_env(path: Path) -> dict:
 
 
 ENV = load_env(ENV_PATH)
+
+
+# ============================================================================
+# Mapeo Job Templates (configurable via .env, cambia automaticamente al
+# alternar entre AWX local y AWX Azure).
+# ============================================================================
+JT_IDS = {
+    "jt_workspace_snapshot": int(ENV.get("AWX_JT_WORKSPACE_SNAPSHOT", 32)),
+    "jt_errors_analysis":    int(ENV.get("AWX_JT_ERRORS_ANALYSIS", 33)),
+    "jt_sox_audit":          int(ENV.get("AWX_JT_SOX_AUDIT", 34)),
+    "jt_brute_force":        int(ENV.get("AWX_JT_BRUTE_FORCE", 35)),
+}
+TEMPLATES_NEEDING_AZURE_CREDS = set(JT_IDS.values())
+
+
+def _agent_name_for_config() -> str:
+    """AGENT_NAME derivado del hash de los JT IDs. Al cambiar de AWX cambia
+    automaticamente el nombre, forzando un agente nuevo en Foundry con los
+    instructions actuales (sin caching cross-config)."""
+    ids = ",".join(str(v) for v in sorted(JT_IDS.values()))
+    h = hashlib.sha256(ids.encode()).hexdigest()[:6]
+    return f"talento-triage-agent-{h}"
+
+
+AGENT_NAME = _agent_name_for_config()
+
+
+DEMO_QUESTIONS = {
+    "1": (
+        "Realiza un health check operativo de TALENTO: primero diagnostica si "
+        "hay errores recientes en el workspace, luego ejecuta el snapshot del "
+        f"runtime de automatizacion AWX (template_id={JT_IDS['jt_workspace_snapshot']}) "
+        "para verificar que tenemos via de diagnostico activa. Reporta los "
+        "dos resultados."
+    ),
+    "2": (
+        "Ejecuta un snapshot completo del workspace de TALENTO via el job "
+        f"template AWX talento-workspace-snapshot (template_id={JT_IDS['jt_workspace_snapshot']}) "
+        "con rango de 24 horas. Cuando termine, sintetiza los hallazgos del "
+        "snapshot."
+    ),
+    "3": (
+        f"Lanza el job template id {JT_IDS['jt_workspace_snapshot']} en AWX como prueba "
+        "de cable agente <-> runtime de automatizacion. Reporta job_id, "
+        "status y resumen del stdout."
+    ),
+    "4": (
+        "¿Tenemos errores o warnings significativos en TALENTO en las "
+        "ultimas 24 horas? Lanza el analisis especifico de errores via AWX "
+        f"(template_id={JT_IDS['jt_errors_analysis']}) y sintetiza los hallazgos: "
+        "cuantos eventos criticos, que containers estan afectados, y cuales "
+        "son los top mensajes recurrentes. Indica el nivel de severidad global."
+    ),
+    "5": (
+        "TALENTO es un sistema regulado por SOX. Necesito una auditoria de "
+        "actividad de las ultimas 24 horas: que usuarios han accedido, que "
+        "acciones privilegiadas se ejecutaron (aprobaciones, rol=LIDER, "
+        "consultas masivas), y si hay incidentes de seguridad a nivel BD "
+        f"(failed logins SQL, exceptions). Ejecuta el job template {JT_IDS['jt_sox_audit']} "
+        "(talento-sox-audit) y reporta los hallazgos con el audit_status."
+    ),
+}
+
+DEFAULT_QUESTION_KEY = "1"
 
 
 # ============================================================================
@@ -292,56 +313,63 @@ def run_awx_job_template(
 # ============================================================================
 # Setup del agente — 2 tools registradas
 # ============================================================================
-SYSTEM_INSTRUCTIONS = (
-    "Eres un asistente experto en analisis y remediacion de incidentes IT, "
-    "especializado en la solucion corporativa TALENTO: sistema de gestion de "
-    "talento humano, IaaS, operacion 7x24, regulado por SOX. Componentes en "
-    "Azure (App Service, Azure SQL, Container Instances, Application Insights, "
-    "Log Analytics) y aplicaciones OnPremise (Windows Server 2019, Oracle 12c, "
-    "NAS/SAN).\n\n"
-    "Tienes DOS tools:\n\n"
-    "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
-    "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
-    "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un job "
-    "   template en AWX. Para ACCIONES operativas. Templates HOY:\n"
-    "   - id=47 talento-smoke-test (hello world, sin efecto real)\n"
-    "   - id=48 talento-workspace-snapshot (inventario amplio: tablas + "
-    "     schema + muestra. Para 'que hay en los logs').\n"
-    "   - id=49 talento-errors-analysis (FOCO en ERROR/WARN: severidad, top "
-    "     mensajes, containers afectados. Para 'que problemas tenemos').\n"
-    "   - id=50 talento-sox-audit (FOCO en SOX/seguridad: logins por usuario, "
-    "     acciones privilegiadas con rol, incidentes de seguridad a nivel BD. "
-    "     Para 'auditoria de accesos', 'quien hizo que', 'cumplimiento SOX', "
-    "     'actividad sospechosa'). Devuelve audit_status SECURITY_INCIDENT/"
-    "     AUDIT_REVIEW/NORMAL.\n"
-    "   - id=51 talento-brute-force-detector (FOCO en patrones de brute "
-    "     force: failed logins agrupados por usuario con umbral. Para "
-    "     'detectar brute force', 'intentos de login fallidos', 'ataques de "
-    "     fuerza bruta'). Devuelve bruteforce_severity HIGH/MEDIUM/LOW. "
-    "     extra_vars opcionales: {\"time_range_hours\": <int>, "
-    "     \"failed_threshold\": <int>}.\n"
-    "   Todos los JTs 48, 49, 50 y 51 envian adaptive card a Teams "
-    "   automaticamente (color segun severidad).\n"
-    "   extra_vars opcional para 48/49/50/51: {\"time_range_hours\": <int>} "
-    "   default 24.\n\n"
-    "PROTOCOLO:\n"
-    "A) Para preguntas operativas: primero descubrimiento con "
-    "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
-    "   summarize count() by Tabla | order by count_ desc'.\n"
-    "B) Si necesitas el esquema de una tabla, '<tabla> | getschema' antes de "
-    "   queries complejas.\n"
-    "C) Si el usuario pide ejecutar una accion o validar el runtime de "
-    "   automatizacion, usa run_awx_job_template con el template_id apropiado.\n"
-    "D) Tras una accion AWX, verifica con query_log_analytics si los datos "
-    "   reflejan el cambio (cuando aplique).\n\n"
-    "RESPUESTA FINAL siempre en espanol, estructurada:\n"
-    "- Hallazgo (datos concretos)\n"
-    "- Hipotesis (1-3 ordenadas por probabilidad)\n"
-    "- Pasos de diagnostico (que validar)\n"
-    "- Accion correctiva (que se hizo / que hacer)\n\n"
-    "Tecnico, conciso. No inventes datos. Si una tool falla, lee el hint y "
-    "reintenta."
-)
+def build_system_instructions() -> str:
+    """Construye las instrucciones del agente con los JT IDs activos
+    (leidos de .env). Llamar en cada create_version() para que Foundry
+    reciba siempre los IDs vigentes."""
+    snap = JT_IDS["jt_workspace_snapshot"]
+    err = JT_IDS["jt_errors_analysis"]
+    sox = JT_IDS["jt_sox_audit"]
+    bf = JT_IDS["jt_brute_force"]
+    return (
+        "Eres un asistente experto en analisis y remediacion de incidentes IT, "
+        "especializado en la solucion corporativa TALENTO: sistema de gestion de "
+        "talento humano, IaaS, operacion 7x24, regulado por SOX. Componentes en "
+        "Azure (App Service, Azure SQL, Container Instances, Application Insights, "
+        "Log Analytics) y aplicaciones OnPremise (Windows Server 2019, Oracle 12c, "
+        "NAS/SAN).\n\n"
+        "Tienes DOS tools:\n\n"
+        "1. query_log_analytics(query): consulta KQL contra el workspace de Log "
+        "   Analytics. Para DIAGNOSTICO y verificacion de estado.\n\n"
+        "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un job "
+        "   template en AWX. Para ACCIONES operativas. Templates HOY:\n"
+        f"   - id={snap} talento-workspace-snapshot (inventario amplio: tablas + "
+        "     schema + muestra. Para 'que hay en los logs').\n"
+        f"   - id={err} talento-errors-analysis (FOCO en ERROR/WARN: severidad, top "
+        "     mensajes, containers afectados. Para 'que problemas tenemos').\n"
+        f"   - id={sox} talento-sox-audit (FOCO en SOX/seguridad: logins por usuario, "
+        "     acciones privilegiadas con rol, incidentes de seguridad a nivel BD. "
+        "     Para 'auditoria de accesos', 'quien hizo que', 'cumplimiento SOX', "
+        "     'actividad sospechosa'). Devuelve audit_status SECURITY_INCIDENT/"
+        "     AUDIT_REVIEW/NORMAL.\n"
+        f"   - id={bf} talento-brute-force-detector (FOCO en patrones de brute "
+        "     force: failed logins agrupados por usuario con umbral. Para "
+        "     'detectar brute force', 'intentos de login fallidos', 'ataques de "
+        "     fuerza bruta'). Devuelve bruteforce_severity HIGH/MEDIUM/LOW. "
+        "     extra_vars opcionales: {\"time_range_hours\": <int>, "
+        "     \"failed_threshold\": <int>}.\n"
+        f"   Todos los JTs ({snap}, {err}, {sox}, {bf}) envian adaptive card a "
+        "   Teams automaticamente (color segun severidad).\n"
+        f"   extra_vars opcional para los 4 JTs: "
+        "   {\"time_range_hours\": <int>} default 24.\n\n"
+        "PROTOCOLO:\n"
+        "A) Para preguntas operativas: primero descubrimiento con "
+        "   'union withsource=Tabla * | where TimeGenerated > ago(24h) | "
+        "   summarize count() by Tabla | order by count_ desc'.\n"
+        "B) Si necesitas el esquema de una tabla, '<tabla> | getschema' antes de "
+        "   queries complejas.\n"
+        "C) Si el usuario pide ejecutar una accion o validar el runtime de "
+        "   automatizacion, usa run_awx_job_template con el template_id apropiado.\n"
+        "D) Tras una accion AWX, verifica con query_log_analytics si los datos "
+        "   reflejan el cambio (cuando aplique).\n\n"
+        "RESPUESTA FINAL siempre en espanol, estructurada:\n"
+        "- Hallazgo (datos concretos)\n"
+        "- Hipotesis (1-3 ordenadas por probabilidad)\n"
+        "- Pasos de diagnostico (que validar)\n"
+        "- Accion correctiva (que se hizo / que hacer)\n\n"
+        "Tecnico, conciso. No inventes datos. Si una tool falla, lee el hint y "
+        "reintenta."
+    )
 
 TOOL_QUERY_LA = FunctionTool(
     name="query_log_analytics",
@@ -370,42 +398,48 @@ TOOL_QUERY_LA = FunctionTool(
     strict=True,
 )
 
-TOOL_RUN_AWX = FunctionTool(
-    name="run_awx_job_template",
-    description=(
-        "Lanza un Job Template en AWX y espera a que termine. Usala para "
-        "EJECUTAR acciones operativas: smoke tests, snapshots, remediaciones. "
-        "Devuelve job_id, status, elapsed_seconds, stdout_tail y artifacts."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "template_id": {
-                "type": "integer",
-                "description": (
-                    "ID del job template. Disponibles: "
-                    "47 (talento-smoke-test, hello world), "
-                    "48 (talento-workspace-snapshot, inventario amplio), "
-                    "49 (talento-errors-analysis, foco en ERROR/WARN), "
-                    "50 (talento-sox-audit, foco en SOX/accesos/auditoria), "
-                    "51 (talento-brute-force-detector, foco en intentos de login fallidos)."
-                ),
+def build_tool_run_awx() -> FunctionTool:
+    """Tool spec con descripcion construida con los JT IDs activos."""
+    snap = JT_IDS["jt_workspace_snapshot"]
+    err = JT_IDS["jt_errors_analysis"]
+    sox = JT_IDS["jt_sox_audit"]
+    bf = JT_IDS["jt_brute_force"]
+    return FunctionTool(
+        name="run_awx_job_template",
+        description=(
+            "Lanza un Job Template en AWX y espera a que termine. Usala para "
+            "EJECUTAR acciones operativas: smoke tests, snapshots, remediaciones. "
+            "Devuelve job_id, status, elapsed_seconds, stdout_tail y artifacts."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "template_id": {
+                    "type": "integer",
+                    "description": (
+                        "ID del job template. Disponibles: "
+                        f"{snap} (talento-workspace-snapshot, inventario amplio), "
+                        f"{err} (talento-errors-analysis, foco en ERROR/WARN), "
+                        f"{sox} (talento-sox-audit, foco en SOX/accesos/auditoria), "
+                        f"{bf} (talento-brute-force-detector, foco en intentos de login fallidos)."
+                    ),
+                },
+                "extra_vars_json": {
+                    "type": "string",
+                    "description": (
+                        "JSON string con variables extra opcionales. Para "
+                        f"template {snap} puedes pasar "
+                        "'{\"time_range_hours\": 12}'. Si no aplica envia "
+                        "'{}'. NO incluyas credenciales aqui — el bridge las "
+                        "inyecta solo."
+                    ),
+                },
             },
-            "extra_vars_json": {
-                "type": "string",
-                "description": (
-                    "JSON string con variables extra opcionales. Para template "
-                    "48 puedes pasar '{\"time_range_hours\": 12}'. Si no aplica "
-                    "envia '{}'. NO incluyas credenciales aqui — el bridge las "
-                    "inyecta solo."
-                ),
-            },
+            "required": ["template_id", "extra_vars_json"],
+            "additionalProperties": False,
         },
-        "required": ["template_id", "extra_vars_json"],
-        "additionalProperties": False,
-    },
-    strict=True,
-)
+        strict=True,
+    )
 
 
 def setup_agent_version(project: AIProjectClient):
@@ -413,8 +447,8 @@ def setup_agent_version(project: AIProjectClient):
         agent_name=AGENT_NAME,
         definition=PromptAgentDefinition(
             model=MODEL_DEPLOYMENT,
-            instructions=SYSTEM_INSTRUCTIONS,
-            tools=[TOOL_QUERY_LA, TOOL_RUN_AWX],
+            instructions=build_system_instructions(),
+            tools=[TOOL_QUERY_LA, build_tool_run_awx()],
         ),
     )
 

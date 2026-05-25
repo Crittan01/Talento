@@ -4,9 +4,10 @@ Cada escenario define:
 - id: identificador para la API
 - title, icon, subtitle: lo que ve el usuario en la card
 - prompt: instruccion al agente Foundry. Acepta placeholders Python str.format:
-  - {time_range_hours}
-  - {failed_threshold} (solo brute-force)
-- expected_jt: id de Job Template esperado (informativo)
+  - {time_range_hours}, {failed_threshold} (filtros de usuario)
+  - {jt_workspace_snapshot}, {jt_errors_analysis}, {jt_sox_audit},
+    {jt_brute_force} (JT IDs leidos de .env — config modular)
+- expected_jt: id de Job Template esperado (derivado de JT_IDS)
 - renderer: que renderer del frontend se usa
 - pain_point: a que pain point del RFP responde
 - free_text: True si el usuario puede sustituir el prompt
@@ -14,6 +15,7 @@ Cada escenario define:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 
@@ -24,20 +26,45 @@ DEFAULT_FILTERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# JT IDs configurables via .env (config modular). Permite alternar AWX local
+# vs Azure cambiando solo el .env, sin tocar codigo ni prompts.
+# ---------------------------------------------------------------------------
+def _load_jt_ids_from_env() -> dict:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    env = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return {
+        "jt_workspace_snapshot": int(env.get("AWX_JT_WORKSPACE_SNAPSHOT", 32)),
+        "jt_errors_analysis":    int(env.get("AWX_JT_ERRORS_ANALYSIS", 33)),
+        "jt_sox_audit":          int(env.get("AWX_JT_SOX_AUDIT", 34)),
+        "jt_brute_force":        int(env.get("AWX_JT_BRUTE_FORCE", 35)),
+    }
+
+
+JT_IDS = _load_jt_ids_from_env()
+
+
 SCENARIOS = {
     "system-status": {
         "title": "Estado del Sistema",
         "icon": "📊",
         "subtitle": "Inventario amplio del workspace",
         "prompt": (
-            "Ejecuta directamente el job template id=48 (talento-workspace-snapshot) "
-            "con extra_vars_json='{{\"time_range_hours\": {time_range_hours}}}' "
-            "para obtener un inventario completo del workspace de TALENTO en las "
-            "últimas {time_range_hours} horas. Cuando termine, sintetiza los "
-            "hallazgos: tablas pobladas, top tabla, filas, schema, muestra. "
-            "Reporta en español estructurado."
+            "Ejecuta directamente el job template id={jt_workspace_snapshot} "
+            "(talento-workspace-snapshot) con extra_vars_json='{{\"time_range_hours\": "
+            "{time_range_hours}}}' para obtener un inventario completo del "
+            "workspace de TALENTO en las últimas {time_range_hours} horas. "
+            "Cuando termine, sintetiza los hallazgos: tablas pobladas, top "
+            "tabla, filas, schema, muestra. Reporta en español estructurado."
         ),
-        "expected_jt": 48,
+        "expected_jt": JT_IDS["jt_workspace_snapshot"],
         "renderer": "snapshot",
         "pain_point": "(5) Estrategia de monitoreo — vista panorámica",
         "card_class": "card-info",
@@ -49,14 +76,14 @@ SCENARIOS = {
         "icon": "🚨",
         "subtitle": "Detección y análisis de ERROR/WARN críticos",
         "prompt": (
-            "Ejecuta directamente el job template id=49 (talento-errors-analysis) "
-            "con extra_vars_json='{{\"time_range_hours\": {time_range_hours}}}' "
-            "para detectar errores y warnings críticos en TALENTO en las últimas "
-            "{time_range_hours} horas. Cuando termine, sintetiza: cuántos errores, "
-            "cuántos warnings, severity_status, top mensajes, containers afectados. "
-            "Reporta en español."
+            "Ejecuta directamente el job template id={jt_errors_analysis} "
+            "(talento-errors-analysis) con extra_vars_json='{{\"time_range_hours\": "
+            "{time_range_hours}}}' para detectar errores y warnings críticos en "
+            "TALENTO en las últimas {time_range_hours} horas. Cuando termine, "
+            "sintetiza: cuántos errores, cuántos warnings, severity_status, top "
+            "mensajes, containers afectados. Reporta en español."
         ),
-        "expected_jt": 49,
+        "expected_jt": JT_IDS["jt_errors_analysis"],
         "renderer": "errors",
         "pain_point": "Mesa de ayuda sin RCA clara",
         "card_class": "card-alert",
@@ -69,14 +96,14 @@ SCENARIOS = {
         "subtitle": "Quién accedió, qué aprobó, incidentes BD",
         "prompt": (
             "TALENTO es regulado por SOX. Ejecuta directamente el job template "
-            "id=50 (talento-sox-audit) con extra_vars_json='{{\"time_range_hours\": "
-            "{time_range_hours}}}' para auditar la actividad de las últimas "
-            "{time_range_hours} horas. Cuando termine, sintetiza: audit_status, "
-            "logins por usuario, acciones privilegiadas (rol=LIDER, aprobaciones), "
-            "incidentes de seguridad BD (failed SQL logins). Reporta en español "
-            "con énfasis en compliance."
+            "id={jt_sox_audit} (talento-sox-audit) con extra_vars_json="
+            "'{{\"time_range_hours\": {time_range_hours}}}' para auditar la "
+            "actividad de las últimas {time_range_hours} horas. Cuando termine, "
+            "sintetiza: audit_status, logins por usuario, acciones privilegiadas "
+            "(rol=LIDER, aprobaciones), incidentes de seguridad BD (failed SQL "
+            "logins). Reporta en español con énfasis en compliance."
         ),
-        "expected_jt": 50,
+        "expected_jt": JT_IDS["jt_sox_audit"],
         "renderer": "sox",
         "pain_point": "Objetos no autorizados BD + cumplimiento SOX",
         "card_class": "card-critical",
@@ -89,14 +116,14 @@ SCENARIOS = {
         "subtitle": "Múltiples intentos de login fallidos por usuario",
         "prompt": (
             "Detecta intentos de brute force en TALENTO. Ejecuta directamente el "
-            "job template id=51 (talento-brute-force-detector) con "
+            "job template id={jt_brute_force} (talento-brute-force-detector) con "
             "extra_vars_json='{{\"time_range_hours\": {time_range_hours}, "
             "\"failed_threshold\": {failed_threshold}}}' para identificar usuarios "
             "con {failed_threshold}+ intentos fallidos en {time_range_hours} horas. "
             "Cuando termine, sintetiza: usuarios sospechosos, severidad HIGH/MEDIUM/LOW, "
             "recomendación de acción. Reporta en español."
         ),
-        "expected_jt": 51,
+        "expected_jt": JT_IDS["jt_brute_force"],
         "renderer": "brute-force",
         "pain_point": "Accesos no autorizados (foco específico)",
         "card_class": "card-critical",
@@ -109,14 +136,15 @@ SCENARIOS = {
         "subtitle": "Errores y degradación durante cierre mensual",
         "prompt": (
             "Hoy es día de cierre de nómina en TALENTO y se reportó lentitud. "
-            "Ejecuta directamente el job template id=49 (talento-errors-analysis) "
-            "con extra_vars_json='{{\"time_range_hours\": {time_range_hours}}}' "
-            "para detectar errores recientes en las últimas {time_range_hours} horas. "
-            "Sintetiza: errores SQL/Hibernate, containers afectados, hipótesis de "
-            "causa raíz asociada al cierre (conexiones BD saturadas, queries lentas, etc.). "
-            "Reporta en español orientado a operaciones."
+            "Ejecuta directamente el job template id={jt_errors_analysis} "
+            "(talento-errors-analysis) con extra_vars_json='{{\"time_range_hours\": "
+            "{time_range_hours}}}' para detectar errores recientes en las últimas "
+            "{time_range_hours} horas. Sintetiza: errores SQL/Hibernate, containers "
+            "afectados, hipótesis de causa raíz asociada al cierre (conexiones BD "
+            "saturadas, queries lentas, etc.). Reporta en español orientado a "
+            "operaciones."
         ),
-        "expected_jt": 49,
+        "expected_jt": JT_IDS["jt_errors_analysis"],
         "renderer": "errors",
         "pain_point": "Lentitud generalizada en cierres de nómina",
         "card_class": "card-warning",
@@ -178,8 +206,9 @@ def resolve_prompt(
     if scenario["free_text"]:
         return (free_text or "").strip() or None
 
-    # Aplicar filtros con fallback a defaults
-    effective = {**DEFAULT_FILTERS, **(filters or {})}
+    # Aplicar filtros (con fallback a defaults) + JT IDs configurados en .env.
+    # JT_IDS no es override-able por el usuario — es config del entorno.
+    effective = {**DEFAULT_FILTERS, **JT_IDS, **(filters or {})}
     try:
         return scenario["prompt"].format(**effective)
     except (KeyError, ValueError):

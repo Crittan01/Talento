@@ -42,6 +42,53 @@ def _force_mock() -> bool:
     return os.environ.get("FORCE_MOCK", "").lower() in ("1", "true", "yes")
 
 
+@app.on_event("startup")
+def _ensure_foundry_agent() -> None:
+    """Verifica al arrancar uvicorn que el agente Foundry con el AGENT_NAME
+    actual existe (con al menos una version). Si no existe, lo crea via
+    create_version. Esto evita el 404 'Agent X with version not found'
+    cuando se bumpean los JT IDs (nuevo hash → nuevo AGENT_NAME).
+    """
+    if _force_mock():
+        print("[startup] FORCE_MOCK activo — skip Foundry agent setup.", flush=True)
+        return
+    try:
+        import bridge_l2
+        from azure.ai.projects import AIProjectClient
+        from azure.identity import DefaultAzureCredential
+
+        project = AIProjectClient(
+            endpoint=bridge_l2.PROJECT_ENDPOINT,
+            credential=DefaultAzureCredential(exclude_environment_credential=True),
+        )
+        # ¿El agente ya tiene versiones registradas?
+        try:
+            versions = list(project.agents.list_versions(name=bridge_l2.AGENT_NAME))
+        except Exception:
+            versions = []
+        if versions:
+            print(
+                f"[startup] Agente '{bridge_l2.AGENT_NAME}' ya existe "
+                f"con {len(versions)} version(es) — skip create.",
+                flush=True,
+            )
+            return
+        print(
+            f"[startup] Agente '{bridge_l2.AGENT_NAME}' NO existe — creando "
+            f"con JT_IDS={bridge_l2.JT_IDS}...",
+            flush=True,
+        )
+        agent = bridge_l2.setup_agent_version(project)
+        print(
+            f"[startup] ✓ Agente creado: name={agent.name} version={getattr(agent, 'version', '?')}",
+            flush=True,
+        )
+    except Exception as exc:
+        # No bloqueamos el arranque si Foundry no responde — la primera
+        # request fallara y el error sera visible en el dashboard.
+        print(f"[startup] ⚠ No se pudo asegurar el agente Foundry: {exc}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
