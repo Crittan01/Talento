@@ -1,0 +1,226 @@
+---
+# talento-aci-restart.yml
+#
+# REMEDIACION INVASIVA — reinicia un Azure Container Instance.
+#
+# Por defecto corre en DRY-RUN (no ejecuta restart real). Para ejecutar
+# de verdad pasar:
+#   -e dry_run=false
+# o desde AWX/bridge: extra_vars={"is_dry_run": false}
+#
+# Comportamiento DRY-RUN:
+#   1. Obtiene token
+#   2. Lee estado actual del container (read)
+#   3. Imprime la URL que SE LLAMARIA + el cuerpo de la accion
+#   4. Set_stats con action_executed=false
+#   5. Teams card "DRY RUN — habria reiniciado X"
+#
+# Comportamiento REAL (dry_run=false):
+#   1-2 igual que dry-run
+#   3. POST a /restart/action
+#   4. Espera ~5s y vuelve a leer estado para verificar
+#   5. Set_stats con action_executed=true + before/after states
+#   6. Teams card "RESTART aplicado a X — estado nuevo"
+#
+# Vars principales:
+#   container_group_name  default 'aci-centralecopetrol'
+#   resource_group        default 'rg-central-solucion-talento'
+#   is_dry_run               default true  ← SAFETY
+
+- name: TALENTO ACI restart — REMEDIACION (is_dry_run por defecto)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    container_group_name: "{{ container_name | default('aci-centralecopetrol') }}"
+    is_dry_run: "{{ dry_run | default(true) | bool }}"
+    teams_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    action_reason: "{{ reason | default('Auto-remediacion solicitada por agente IA') }}"
+
+  tasks:
+    - name: Validar vars
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+          - container_group_name | length > 0
+        fail_msg: "Faltan vars (azure_* o container_name)"
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    # ──────────────────────────────────────────────────────────────────
+    # Leer estado ANTES (siempre, en dry-run y en real)
+    # ──────────────────────────────────────────────────────────────────
+    - name: Leer estado actual del container
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}?api-version=2023-05-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_before
+
+    - name: Guardar estado antes
+      ansible.builtin.set_fact:
+        state_before_summary:
+          name: "{{ state_before.json.name }}"
+          state: "{{ state_before.json.properties.instanceView.state | default('?') }}"
+          provisioningState: "{{ state_before.json.properties.provisioningState }}"
+          restartCount: "{{ state_before.json.properties.containers | map(attribute='properties.instanceView.restartCount') | map('default', 0) | sum }}"
+        restart_url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}/restart?api-version=2023-05-01"
+
+    # ──────────────────────────────────────────────────────────────────
+    # DRY RUN: solo imprime intencion, no ejecuta
+    # ──────────────────────────────────────────────────────────────────
+    - name: "[DRY-RUN] Mostrar accion que SE EJECUTARIA"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se ejecutara restart real"
+          - "════════════════════════════════════════════════════════"
+          - "  Target:        {{ container_group_name }}"
+          - "  Estado actual: {{ state_before_summary.state }} (restartCount={{ state_before_summary.restartCount }})"
+          - "  URL que se llamaria: POST {{ restart_url }}"
+          - "  Razon: {{ action_reason }}"
+          - ""
+          - "  Para ejecutar de verdad: -e dry_run=false"
+      when: is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────
+    # REAL: ejecuta el restart
+    # ──────────────────────────────────────────────────────────────────
+    - name: "[REAL] Ejecutar restart del container"
+      ansible.builtin.uri:
+        url: "{{ restart_url }}"
+        method: POST
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: [200, 202, 204]
+        timeout: 30
+      register: restart_result
+      when: not is_dry_run
+
+    - name: "[REAL] Esperar 8s a que ACI procese el restart"
+      ansible.builtin.pause:
+        seconds: 8
+      when: not is_dry_run
+
+    - name: "[REAL] Leer estado DESPUES del restart"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}?api-version=2023-05-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_after
+      when: not is_dry_run
+
+    - name: "[REAL] Guardar estado despues"
+      ansible.builtin.set_fact:
+        state_after_summary:
+          name: "{{ state_after.json.name }}"
+          state: "{{ state_after.json.properties.instanceView.state | default('?') }}"
+          provisioningState: "{{ state_after.json.properties.provisioningState }}"
+          restartCount: "{{ state_after.json.properties.containers | map(attribute='properties.instanceView.restartCount') | map('default', 0) | sum }}"
+      when: not is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────
+    # Set_stats — para que el agente sepa lo que paso
+    # ──────────────────────────────────────────────────────────────────
+    - name: Exportar via set_stats
+      ansible.builtin.set_stats:
+        data:
+          action: "restart"
+          target_type: "ContainerInstance"
+          target_name: "{{ container_group_name }}"
+          dry_run: "{{ is_dry_run }}"
+          action_executed: "{{ not is_dry_run }}"
+          state_before: "{{ state_before_summary }}"
+          state_after: "{{ state_after_summary | default({}) }}"
+          reason: "{{ action_reason }}"
+          api_status: "{{ restart_result.status | default(0) if not is_dry_run else 'N/A (is_dry_run)' }}"
+        per_host: false
+
+    # ──────────────────────────────────────────────────────────────────
+    # Teams adaptive card (informativo)
+    # ──────────────────────────────────────────────────────────────────
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ 'warning' if is_dry_run else 'attention' }}"
+                    items:
+                      - type: TextBlock
+                        text: "{{ '🔍 DRY-RUN' if is_dry_run else '🔧 RESTART EJECUTADO' }} — Container Instance"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "{{ container_group_name }} ({{ resource_group }})"
+                        isSubtle: true
+                  - type: FactSet
+                    facts:
+                      - title: "Estado antes"
+                        value: "{{ state_before_summary.state }} (restartCount={{ state_before_summary.restartCount }})"
+                      - title: "Estado despues"
+                        value: "{{ state_after_summary.state ~ ' (restartCount=' ~ state_after_summary.restartCount ~ ')' if not is_dry_run else '(no ejecutado)' }}"
+                      - title: "Razon"
+                        value: "{{ action_reason }}"
+                      - title: "HTTP status"
+                        value: "{{ restart_result.status | default('N/A') if not is_dry_run else 'N/A (is_dry_run)' }}"
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_url | length > 0
+      register: teams_notification
+      retries: 3
+      delay: 3
+      until: teams_notification.status | default(-1) in [200, 202]
+      ignore_errors: true
+
+    - name: Resumen stdout final
+      ansible.builtin.debug:
+        msg: >-
+          {% if is_dry_run %}
+          ✅ DRY-RUN completo. NO se ejecuto restart. Para ejecutar real:
+            ansible-playbook playbooks/talento-aci-restart.yml -e dry_run=false
+          {% else %}
+          ✅ RESTART aplicado a {{ container_group_name }}.
+            Estado: {{ state_before_summary.state }} → {{ state_after_summary.state }}
+            restartCount: {{ state_before_summary.restartCount }} → {{ state_after_summary.restartCount }}
+          {% endif %}

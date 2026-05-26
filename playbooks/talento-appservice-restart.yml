@@ -1,0 +1,195 @@
+---
+# talento-appservice-restart.yml
+#
+# REMEDIACION INVASIVA — reinicia un Azure App Service.
+# IMPACTO: ~30-60s de downtime mientras App Service reinicia los workers.
+#
+# Por defecto corre en DRY-RUN. Para ejecutar:  -e dry_run=false
+#
+# Diferencia con restart de Container Instance:
+#   - App Service no expone instanceView con state — solo properties.state
+#   - El endpoint REST es POST /restart (sin /action)
+#   - No tiene restartCount — el equivalente es ver eventos en Activity Log
+
+- name: TALENTO App Service restart — REMEDIACION (is_dry_run por defecto)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    site_name: "{{ appservice_name | default('app-central-ecopetrol') }}"
+    is_dry_run: "{{ dry_run | default(true) | bool }}"
+    teams_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    action_reason: "{{ reason | default('Auto-remediacion solicitada por agente IA') }}"
+
+  tasks:
+    - name: Validar vars
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+          - site_name | length > 0
+        fail_msg: "Faltan vars (azure_* o appservice_name)"
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Leer estado actual del App Service
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Web/sites/{{ site_name }}?api-version=2023-12-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_before
+
+    - name: Guardar estado antes + URL restart
+      ansible.builtin.set_fact:
+        state_before_summary:
+          name: "{{ state_before.json.name }}"
+          state: "{{ state_before.json.properties.state }}"
+          enabled: "{{ state_before.json.properties.enabled }}"
+          availabilityState: "{{ state_before.json.properties.availabilityState }}"
+          defaultHostName: "{{ state_before.json.properties.defaultHostName }}"
+        restart_url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Web/sites/{{ site_name }}/restart?api-version=2023-12-01"
+
+    - name: "[DRY-RUN] Mostrar accion que SE EJECUTARIA"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se ejecutara restart real"
+          - "════════════════════════════════════════════════════════"
+          - "  Target:        {{ site_name }} ({{ state_before_summary.defaultHostName }})"
+          - "  Estado actual: {{ state_before_summary.state }} (availability={{ state_before_summary.availabilityState }})"
+          - "  URL que se llamaria: POST {{ restart_url }}"
+          - "  Impacto: 30-60s downtime mientras App Service reinicia los workers"
+          - "  Razon: {{ action_reason }}"
+          - ""
+          - "  Para ejecutar de verdad: -e dry_run=false"
+      when: is_dry_run
+
+    - name: "[REAL] Ejecutar restart App Service"
+      ansible.builtin.uri:
+        url: "{{ restart_url }}"
+        method: POST
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: [200, 202, 204]
+        timeout: 30
+      register: restart_result
+      when: not is_dry_run
+
+    - name: "[REAL] Esperar 30s a que App Service reinicie workers"
+      ansible.builtin.pause:
+        seconds: 30
+      when: not is_dry_run
+
+    - name: "[REAL] Leer estado DESPUES"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Web/sites/{{ site_name }}?api-version=2023-12-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_after
+      when: not is_dry_run
+
+    - name: "[REAL] Guardar estado despues"
+      ansible.builtin.set_fact:
+        state_after_summary:
+          name: "{{ state_after.json.name }}"
+          state: "{{ state_after.json.properties.state }}"
+          enabled: "{{ state_after.json.properties.enabled }}"
+          availabilityState: "{{ state_after.json.properties.availabilityState }}"
+      when: not is_dry_run
+
+    - name: Exportar via set_stats
+      ansible.builtin.set_stats:
+        data:
+          action: "restart"
+          target_type: "AppService"
+          target_name: "{{ site_name }}"
+          dry_run: "{{ is_dry_run }}"
+          action_executed: "{{ not is_dry_run }}"
+          state_before: "{{ state_before_summary }}"
+          state_after: "{{ state_after_summary | default({}) }}"
+          reason: "{{ action_reason }}"
+          api_status: "{{ restart_result.status | default(0) if not is_dry_run else 'N/A (is_dry_run)' }}"
+        per_host: false
+
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        headers: { Content-Type: "application/json" }
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ 'warning' if is_dry_run else 'attention' }}"
+                    items:
+                      - type: TextBlock
+                        text: "{{ '🔍 DRY-RUN' if is_dry_run else '🔧 RESTART EJECUTADO' }} — App Service"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "{{ site_name }} ({{ resource_group }})"
+                        isSubtle: true
+                  - type: FactSet
+                    facts:
+                      - title: "Host"
+                        value: "{{ state_before_summary.defaultHostName }}"
+                      - title: "Estado antes"
+                        value: "{{ state_before_summary.state }} ({{ state_before_summary.availabilityState }})"
+                      - title: "Estado despues"
+                        value: "{{ state_after_summary.state ~ ' (' ~ state_after_summary.availabilityState ~ ')' if not is_dry_run else '(no ejecutado)' }}"
+                      - title: "Razon"
+                        value: "{{ action_reason }}"
+                      - title: "HTTP status"
+                        value: "{{ restart_result.status | default('N/A') if not is_dry_run else 'N/A (is_dry_run)' }}"
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_url | length > 0
+      register: teams_notification
+      retries: 3
+      delay: 3
+      until: teams_notification.status | default(-1) in [200, 202]
+      ignore_errors: true
+
+    - name: Resumen stdout
+      ansible.builtin.debug:
+        msg: >-
+          {% if is_dry_run %}
+          ✅ DRY-RUN completo. Para ejecutar real: -e dry_run=false
+          {% else %}
+          ✅ RESTART aplicado a App Service {{ site_name }}. Estado: {{ state_before_summary.state }} → {{ state_after_summary.state }}
+          {% endif %}

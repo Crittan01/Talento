@@ -1,0 +1,133 @@
+---
+# talento-aci-state.yml
+#
+# DIAGNOSTICO (no invasivo) — reporta el estado actual de los Azure
+# Container Instances del RG rg-central-solucion-talento.
+#
+# Para cada container group muestra:
+#   - state (Running/Terminated/Pending/...), provisioningState
+#   - restartCount agregado de los containers
+#   - eventos recientes (Started/BackOff/Pulled/...)
+#   - lastEvent timestamp
+#
+# Lo consume el agente IA para decidir si conviene proponer un restart.
+#
+# Vars (extra_vars con fallback al entorno):
+#   azure_tenant_id / azure_client_id / azure_client_secret / azure_subscription_id
+#   resource_group (default: rg-central-solucion-talento)
+#
+# Set_stats:
+#   aci_count, aci_summary (lista de dicts), aci_severity (HEALTHY/DEGRADED/CRITICAL)
+
+- name: TALENTO ACI state — diagnostico no invasivo de containers
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+  tasks:
+    - name: Validar vars Azure
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+        fail_msg: "Faltan vars azure_*"
+
+    - name: Obtener token OAuth2 (Azure ARM)
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Listar Container Instances del RG (con instanceView)
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups?api-version=2023-05-01"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: 200
+        timeout: 30
+      register: aci_list
+
+    - name: Obtener detalle (con instanceView) por cada container group
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ item.name }}?api-version=2023-05-01"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: 200
+        timeout: 30
+      register: aci_detail_list
+      loop: "{{ aci_list.json.value }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Procesar estado por container
+      ansible.builtin.set_fact:
+        aci_summary: >-
+          {{ aci_summary | default([]) + [{
+            'name': item.json.name,
+            'state': (item.json.properties.instanceView.state | default('Unknown')),
+            'provisioningState': item.json.properties.provisioningState,
+            'restartCount': (item.json.properties.containers | map(attribute='properties.instanceView.restartCount') | map('default', 0) | sum),
+            'last_event_type': ((item.json.properties.instanceView.events | default([]) | last).type | default(None)),
+            'last_event_message': ((item.json.properties.instanceView.events | default([]) | last).message | default(None) | regex_replace('\\s+', ' ') | truncate(160)),
+            'event_count': (item.json.properties.instanceView.events | default([]) | length),
+            'image': (item.json.properties.containers | map(attribute='properties.image') | join(', ')),
+            'cpu': (item.json.properties.containers | map(attribute='properties.resources.requests.cpu') | join(', ')),
+            'mem_gb': (item.json.properties.containers | map(attribute='properties.resources.requests.memoryInGB') | join(', '))
+          }] }}
+      loop: "{{ aci_detail_list.results }}"
+      loop_control:
+        label: "{{ item.json.name }}"
+
+    - name: Clasificar severidad
+      ansible.builtin.set_fact:
+        critical: "{{ aci_summary | selectattr('state', 'in', ['Terminated', 'Failed']) | list }}"
+        degraded: "{{ aci_summary | selectattr('restartCount', 'gt', 3) | list }}"
+
+    - name: Determinar aci_severity
+      ansible.builtin.set_fact:
+        aci_severity: "{{ 'CRITICAL' if critical | length > 0 else ('DEGRADED' if degraded | length > 0 else 'HEALTHY') }}"
+
+    - name: Exportar via set_stats
+      ansible.builtin.set_stats:
+        data:
+          aci_count: "{{ aci_summary | length }}"
+          aci_summary: "{{ aci_summary }}"
+          aci_severity: "{{ aci_severity }}"
+          aci_critical_count: "{{ critical | length }}"
+          aci_degraded_count: "{{ degraded | length }}"
+          resource_group: "{{ resource_group }}"
+        per_host: false
+
+    - name: Resumen stdout
+      ansible.builtin.debug:
+        msg:
+          - "=== ACI STATE — {{ resource_group }} ==="
+          - "Containers analizados: {{ aci_summary | length }}"
+          - "Severidad: {{ aci_severity }}"
+          - "Detalle:"
+          - "{{ aci_summary }}"

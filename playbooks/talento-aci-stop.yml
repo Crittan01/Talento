@@ -1,0 +1,190 @@
+---
+# talento-aci-stop.yml
+#
+# REMEDIACION INVASIVA — DETIENE un Azure Container Instance.
+# IMPACTO: el container queda 'Stopped' — Azure deja de cobrar compute
+# pero la app TALENTO queda fuera de servicio hasta que se haga start.
+#
+# Por defecto corre en DRY-RUN. Para ejecutar:  -e dry_run=false
+#
+# Casos de uso tipicos para invocarlo:
+#   - Aislar un container comprometido durante un incidente de seguridad
+#   - Liberar recursos en ventanas de mantenimiento
+#   - Combo Stop + Start como "restart fuerte" (state limpio)
+
+- name: TALENTO ACI stop — REMEDIACION (is_dry_run por defecto)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    container_group_name: "{{ container_name | default('aci-centralecopetrol') }}"
+    is_dry_run: "{{ dry_run | default(true) | bool }}"
+    teams_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    action_reason: "{{ reason | default('Auto-remediacion solicitada por agente IA') }}"
+
+  tasks:
+    - name: Validar vars
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+        fail_msg: "Faltan vars azure_*"
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    - name: Leer estado actual
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}?api-version=2023-05-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_before
+
+    - name: Guardar estado antes + URL stop
+      ansible.builtin.set_fact:
+        state_before_summary:
+          name: "{{ state_before.json.name }}"
+          state: "{{ state_before.json.properties.instanceView.state | default('?') }}"
+          provisioningState: "{{ state_before.json.properties.provisioningState }}"
+        stop_url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}/stop?api-version=2023-05-01"
+
+    - name: "[DRY-RUN] Mostrar accion que SE EJECUTARIA"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se ejecutara stop real"
+          - "════════════════════════════════════════════════════════"
+          - "  Target:        {{ container_group_name }}"
+          - "  Estado actual: {{ state_before_summary.state }}"
+          - "  URL que se llamaria: POST {{ stop_url }}"
+          - "  Impacto: container quedaria 'Stopped', app TALENTO inaccesible hasta start."
+          - "  Razon: {{ action_reason }}"
+          - ""
+          - "  Para ejecutar de verdad: -e dry_run=false"
+      when: is_dry_run
+
+    - name: "[REAL] Ejecutar stop"
+      ansible.builtin.uri:
+        url: "{{ stop_url }}"
+        method: POST
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: [200, 202, 204]
+        timeout: 30
+      register: stop_result
+      when: not is_dry_run
+
+    - name: "[REAL] Esperar 8s"
+      ansible.builtin.pause:
+        seconds: 8
+      when: not is_dry_run
+
+    - name: "[REAL] Leer estado DESPUES"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups/{{ container_group_name }}?api-version=2023-05-01"
+        method: GET
+        headers: { Authorization: "Bearer {{ arm_token }}" }
+        status_code: 200
+        timeout: 30
+      register: state_after
+      when: not is_dry_run
+
+    - name: "[REAL] Guardar estado despues"
+      ansible.builtin.set_fact:
+        state_after_summary:
+          name: "{{ state_after.json.name }}"
+          state: "{{ state_after.json.properties.instanceView.state | default('?') }}"
+          provisioningState: "{{ state_after.json.properties.provisioningState }}"
+      when: not is_dry_run
+
+    - name: Exportar via set_stats
+      ansible.builtin.set_stats:
+        data:
+          action: "stop"
+          target_type: "ContainerInstance"
+          target_name: "{{ container_group_name }}"
+          dry_run: "{{ is_dry_run }}"
+          action_executed: "{{ not is_dry_run }}"
+          state_before: "{{ state_before_summary }}"
+          state_after: "{{ state_after_summary | default({}) }}"
+          reason: "{{ action_reason }}"
+          api_status: "{{ stop_result.status | default(0) if not is_dry_run else 'N/A (is_dry_run)' }}"
+        per_host: false
+
+    - name: Notificar via adaptive card en Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        headers: { Content-Type: "application/json" }
+        body_format: json
+        body:
+          type: message
+          attachments:
+            - contentType: "application/vnd.microsoft.card.adaptive"
+              content:
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
+                type: AdaptiveCard
+                version: "1.4"
+                body:
+                  - type: Container
+                    style: "{{ 'warning' if is_dry_run else 'attention' }}"
+                    items:
+                      - type: TextBlock
+                        text: "{{ '🔍 DRY-RUN' if is_dry_run else '⛔ STOP EJECUTADO' }} — Container Instance"
+                        weight: Bolder
+                        size: Large
+                      - type: TextBlock
+                        text: "{{ container_group_name }} ({{ resource_group }})"
+                        isSubtle: true
+                  - type: FactSet
+                    facts:
+                      - title: "Estado antes"
+                        value: "{{ state_before_summary.state }}"
+                      - title: "Estado despues"
+                        value: "{{ state_after_summary.state if not is_dry_run else '(no ejecutado)' }}"
+                      - title: "Razon"
+                        value: "{{ action_reason }}"
+                      - title: "HTTP status"
+                        value: "{{ stop_result.status | default('N/A') if not is_dry_run else 'N/A (is_dry_run)' }}"
+        status_code: [200, 202]
+        timeout: 15
+      when: teams_url | length > 0
+      register: teams_notification
+      retries: 3
+      delay: 3
+      until: teams_notification.status | default(-1) in [200, 202]
+      ignore_errors: true
+
+    - name: Resumen stdout
+      ansible.builtin.debug:
+        msg: >-
+          {% if is_dry_run %}
+          ✅ DRY-RUN completo. Para ejecutar real: -e dry_run=false
+          {% else %}
+          ✅ STOP aplicado a {{ container_group_name }}. Estado: {{ state_before_summary.state }} → {{ state_after_summary.state }}
+          {% endif %}

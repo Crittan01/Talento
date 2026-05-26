@@ -1,0 +1,221 @@
+---
+# talento-aci-permissions-test.yml
+#
+# Auditoria de permisos Azure RBAC del Service Principal sobre el RG
+# rg-central-solucion-talento. NO ejecuta acciones destructivas — solo
+# lectura + enumeracion via Microsoft.Authorization/permissions.
+#
+# Doble proposito:
+#   1. ANTES de la asignacion → genera la evidencia para mostrar al admin
+#      de Azure (Ing. Carlos) que el SP no tiene permisos efectivos.
+#   2. DESPUES de la asignacion (el SP entra al grupo o le asignan
+#      Contributor directo) → certifica que los 11 permisos quedaron OK.
+#
+# Acciones evaluadas (las 11 necesarias para auto-remediacion):
+#   Container Instance: read, restart, stop, start, logs (5)
+#   App Service:        read, restart                    (2)
+#   SQL:                servers/read, databases/read     (2)
+#   Log Analytics:      workspaces/read, query/action    (2)
+#
+# Variables Azure (extra_vars, con fallback al entorno):
+#   azure_tenant_id
+#   azure_client_id
+#   azure_client_secret
+#   azure_subscription_id
+#
+# Salida via set_stats:
+#   permissions_status:     GRANTED | DENIED | PARTIAL
+#   allowed_actions_count:  numero de actions efectivas
+#   missing_actions:        lista de acciones requeridas que faltan
+#   resource_group_visible: true si el SP puede listar containers en el RG
+
+- name: TALENTO — auditoria de permisos del Service Principal sobre el RG
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    resource_group: "rg-central-solucion-talento"
+    tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+
+    required_actions:
+      - { action: "Microsoft.ContainerInstance/containerGroups/read",                    descr: "Leer estado del Container Instance" }
+      - { action: "Microsoft.ContainerInstance/containerGroups/restart/action",          descr: "Reiniciar container (REMEDIACION)" }
+      - { action: "Microsoft.ContainerInstance/containerGroups/stop/action",             descr: "Detener container (REMEDIACION)" }
+      - { action: "Microsoft.ContainerInstance/containerGroups/start/action",            descr: "Iniciar container (REMEDIACION)" }
+      - { action: "Microsoft.ContainerInstance/containerGroups/containers/logs/action",  descr: "Leer logs en vivo del container" }
+      - { action: "Microsoft.Web/sites/read",                                            descr: "Leer estado del App Service" }
+      - { action: "Microsoft.Web/sites/restart/action",                                  descr: "Reiniciar App Service (REMEDIACION)" }
+      - { action: "Microsoft.Sql/servers/read",                                          descr: "Leer estado del SQL Server" }
+      - { action: "Microsoft.Sql/servers/databases/read",                                descr: "Leer estado de la base de datos" }
+      - { action: "Microsoft.OperationalInsights/workspaces/read",                       descr: "Leer Log Analytics workspace" }
+      - { action: "Microsoft.OperationalInsights/workspaces/query/action",               descr: "Ejecutar KQL queries" }
+
+  tasks:
+    - name: Validar variables Azure
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+        fail_msg: "Faltan vars azure_tenant_id/client_id/client_secret/subscription_id"
+
+    - name: Obtener token OAuth2 para Azure Resource Manager
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: token_response
+      no_log: true
+
+    - name: Guardar token ARM
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_response.json.access_token }}"
+      no_log: true
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TEST 1 — Read sobre Container Instances (deberia darnos vista al RG)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "TEST 1 — Listar Container Instances en {{ resource_group }}"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.ContainerInstance/containerGroups?api-version=2023-05-01"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: [200, 403, 404]
+        timeout: 30
+      register: test_aci_list
+      ignore_errors: true
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TEST 2 — Read sobre App Services
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "TEST 2 — Listar App Services en {{ resource_group }}"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Web/sites?api-version=2023-12-01"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: [200, 403, 404]
+        timeout: 30
+      register: test_web_list
+      ignore_errors: true
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TEST 3 — Enumerar permisos efectivos en el RG
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "TEST 3 — Enumerar permisos efectivos sobre el RG"
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/resourceGroups/{{ resource_group }}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: [200, 403]
+        timeout: 30
+      register: test_perms
+      ignore_errors: true
+
+    - name: Extraer lista plana de actions permitidas
+      ansible.builtin.set_fact:
+        allowed_actions: "{{ test_perms.json.value | default([]) | map(attribute='actions') | flatten | list }}"
+        not_actions: "{{ test_perms.json.value | default([]) | map(attribute='notActions') | flatten | list }}"
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Cross-check accion por accion (soporta wildcards * de Azure RBAC)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Evaluar cada accion requerida contra patrones permitidos
+      ansible.builtin.set_fact:
+        results: "{{ results | default([]) + [{
+          'action': item.action,
+          'descr': item.descr,
+          'allowed': (allowed_actions
+                      | map('regex_replace', '\\*', '.*')
+                      | select('match', '^' + (item.action | regex_escape) + '$|^' + (item.action | regex_replace('/[^/]+$', '/.*') | regex_escape) + '$')
+                      | list | length > 0) or
+                     ((allowed_actions | select('search', '^\\*$') | list | length) > 0)
+        }] }}"
+      loop: "{{ required_actions }}"
+
+    - name: Calcular metricas
+      ansible.builtin.set_fact:
+        allowed_count: "{{ results | selectattr('allowed', 'equalto', true) | list | length }}"
+        missing_actions: "{{ results | rejectattr('allowed', 'equalto', true) | map(attribute='action') | list }}"
+        aci_list_status: "{{ test_aci_list.status | default('?') }}"
+        web_list_status: "{{ test_web_list.status | default('?') }}"
+
+    - name: Clasificar status general
+      ansible.builtin.set_fact:
+        permissions_status: "{{ 'GRANTED' if (allowed_count | int) == (required_actions | length)
+                              else ('PARTIAL' if (allowed_count | int) > 0 else 'DENIED') }}"
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Exportar artifacts (visible en AWX → Job Details)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Exportar resultados via set_stats
+      ansible.builtin.set_stats:
+        data:
+          permissions_status: "{{ permissions_status }}"
+          allowed_actions_count: "{{ allowed_count }}"
+          required_actions_count: "{{ required_actions | length }}"
+          missing_actions: "{{ missing_actions }}"
+          resource_group: "{{ resource_group }}"
+          subscription_id: "{{ subscription_id }}"
+          client_id: "{{ client_id }}"
+          aci_list_http: "{{ aci_list_status }}"
+          web_list_http: "{{ web_list_status }}"
+          allowed_actions_sample: "{{ allowed_actions[:10] }}"
+        per_host: false
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Reporte visual al stdout (lo que se ve en el dashboard / AWX)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Resumen ejecutivo
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════════════"
+          - "  AUDITORIA DE PERMISOS — Service Principal sobre el RG"
+          - "════════════════════════════════════════════════════════════════"
+          - "  Resource Group:  {{ resource_group }}"
+          - "  Subscription:    {{ subscription_id }}"
+          - "  Service Principal (Client ID): {{ client_id }}"
+          - ""
+          - "  Tests de lectura:"
+          - "    [TEST 1] Listar containers          → HTTP {{ aci_list_status }}  {{ '(OK)' if aci_list_status == 200 else '(FORBIDDEN)' }}"
+          - "    [TEST 2] Listar App Services        → HTTP {{ web_list_status }}  {{ '(OK)' if web_list_status == 200 else '(FORBIDDEN)' }}"
+          - "    [TEST 3] Enumerar permisos efectivos → {{ allowed_actions | length }} patrones permitidos"
+          - ""
+          - "  Cross-check contra acciones requeridas: {{ allowed_count }} / {{ required_actions | length }}"
+          - "  STATUS GLOBAL: {{ permissions_status }}"
+
+    - name: Detalle accion por accion
+      ansible.builtin.debug:
+        msg: "  [{{ '✅' if item.allowed else '❌' }}] {{ item.action }}  ← {{ item.descr }}"
+      loop: "{{ results }}"
+      loop_control:
+        label: "{{ item.action }}"
+
+    - name: Recomendacion final
+      ansible.builtin.debug:
+        msg: >-
+          {% if permissions_status == 'GRANTED' %}
+          ✅ TODOS LOS PERMISOS OK — el SP esta habilitado para auto-remediacion sobre {{ resource_group }}.
+          {% elif permissions_status == 'PARTIAL' %}
+          ⚠️ PERMISOS PARCIALES — faltan {{ missing_actions | length }} action(s). Pedir al admin Azure que complete:
+          {{ missing_actions | join(', ') }}
+          {% else %}
+          ❌ PERMISOS DENEGADOS — el SP no tiene actions efectivas sobre {{ resource_group }}.
+          Accion: pedir al admin Azure agregar el SP al grupo Group_Demo_Ecopetrol_Talento
+          (que ya tiene Contributor sobre el RG), o asignar Contributor directo al SP.
+          Service Principal Client ID: {{ client_id }}
+          {% endif %}
