@@ -37,10 +37,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import requests
+import os
 import urllib3
 from azure.ai.projects import AIProjectClient
 from azure.ai.projects.models import FunctionTool, PromptAgentDefinition
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 
 # Suprime warning por el cert autofirmado del AWX nip.io local
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -56,20 +57,48 @@ ENV_PATH = Path(__file__).parent / ".env"
 
 
 # ============================================================================
-# Carga del .env (debe ir antes de derivar JT_IDS y AGENT_NAME)
+# Carga del .env si existe (modo local). En Azure Function, leer de os.environ
+# (Application Settings).
 # ============================================================================
 def load_env(path: Path) -> dict:
-    env = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        env[k.strip()] = v.strip().strip('"').strip("'")
+    """Carga vars del .env si existe (modo local) y las merge con os.environ.
+    En Azure Function el .env no esta presente; todo viene de Application
+    Settings, que viven en os.environ."""
+    env = dict(os.environ)  # baseline: variables del entorno (Function settings)
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
     return env
 
 
 ENV = load_env(ENV_PATH)
+
+
+# ============================================================================
+# Credencial Azure: detecta si estamos en Function (usa User Assigned MI) o
+# en local (usa az login via DefaultAzureCredential).
+# ============================================================================
+def get_azure_credential():
+    """Devuelve la credencial apropiada segun el entorno.
+
+    - En Azure Function CON AZURE_MI_CLIENT_ID: User Assigned MI (con client_id).
+    - En Azure Function SIN AZURE_MI_CLIENT_ID: System Assigned MI (default).
+    - En local: az login del usuario.
+    """
+    in_function = bool(os.environ.get("FUNCTIONS_WORKER_RUNTIME"))
+    if in_function:
+        mi_client_id = os.environ.get("AZURE_MI_CLIENT_ID", "").strip()
+        if mi_client_id:
+            # User Assigned MI con client_id explicito
+            return ManagedIdentityCredential(client_id=mi_client_id)
+        # System Assigned MI (default cuando no se pasa client_id)
+        return ManagedIdentityCredential()
+    # Local dev
+    return DefaultAzureCredential(exclude_environment_credential=True)
 
 
 # ============================================================================
@@ -679,14 +708,11 @@ def main():
     print("└" + "─" * 76 + "┘")
 
     print("\n► Conectando a Foundry...")
-    # Importante: exclude_environment_credential=True fuerza a usar el az login
-    # del usuario. Si no se excluye, DefaultAzureCredential toma las vars
-    # AZURE_CLIENT_ID/SECRET/TENANT_ID del .env y las usa como SP — pero ese
-    # SP solo tiene rol Log Analytics Reader, no tiene acceso a Foundry. El
-    # usuario que hizo `az login` SÍ tiene acceso a Foundry.
+    # get_azure_credential() auto-selecciona: User Assigned MI en Function,
+    # az login en local. Ver definicion arriba.
     project = AIProjectClient(
         endpoint=PROJECT_ENDPOINT,
-        credential=DefaultAzureCredential(exclude_environment_credential=True),
+        credential=get_azure_credential(),
     )
 
     agent_name = AGENT_NAME

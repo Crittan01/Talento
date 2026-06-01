@@ -41,10 +41,21 @@ def _load_jt_ids_from_env() -> dict:
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip().strip('"').strip("'")
     return {
+        # Analisis de logs
         "jt_workspace_snapshot": int(env.get("AWX_JT_WORKSPACE_SNAPSHOT", 32)),
         "jt_errors_analysis":    int(env.get("AWX_JT_ERRORS_ANALYSIS", 33)),
         "jt_sox_audit":          int(env.get("AWX_JT_SOX_AUDIT", 34)),
         "jt_brute_force":        int(env.get("AWX_JT_BRUTE_FORCE", 35)),
+        # Diagnostico de infraestructura (no invasivos)
+        "jt_aci_state":          int(env.get("AWX_JT_ACI_STATE", 52)),
+        "jt_appservice_state":   int(env.get("AWX_JT_APPSERVICE_STATE", 53)),
+        "jt_sql_health":         int(env.get("AWX_JT_SQL_HEALTH", 54)),
+        "jt_full_health_check":  int(env.get("AWX_JT_FULL_HEALTH_CHECK", 55)),
+        # Remediacion (dry_run=true por defecto en playbook)
+        "jt_aci_restart":        int(env.get("AWX_JT_ACI_RESTART", 56)),
+        "jt_aci_stop":           int(env.get("AWX_JT_ACI_STOP", 57)),
+        "jt_aci_start":          int(env.get("AWX_JT_ACI_START", 58)),
+        "jt_appservice_restart": int(env.get("AWX_JT_APPSERVICE_RESTART", 59)),
     }
 
 
@@ -150,6 +161,108 @@ SCENARIOS = {
         "card_class": "card-warning",
         "free_text": False,
         "accepts_filters": ["time_range_hours"],
+    },
+    # ──────────────────────────────────────────────────────────────
+    # AUTO-REMEDIACION — diagnostico de infraestructura (no invasivo)
+    # ──────────────────────────────────────────────────────────────
+    "infra-health-check": {
+        "title": "Health Check Completo",
+        "icon": "🏥",
+        "subtitle": "Estado ACI + App Service + SQL en una sola corrida",
+        "prompt": (
+            "Ejecuta directamente el job template id={jt_full_health_check} "
+            "(talento-full-health-check) con extra_vars_json='{{}}' para obtener "
+            "un panorama de salud completo de la infraestructura de TALENTO. "
+            "Cuando termine, sintetiza: estado de cada capa (ACI, App Service, "
+            "SQL), veredicto global (HEALTHY/DEGRADED/CRITICAL) y recomendacion "
+            "concreta sobre proximos pasos. Reporta en espanol estructurado."
+        ),
+        "expected_jt": JT_IDS["jt_full_health_check"],
+        "renderer": "generic",
+        "pain_point": "Vision panoramica de infraestructura (caso de uso 4.1)",
+        "card_class": "card-info",
+        "free_text": False,
+        "accepts_filters": [],
+    },
+    "container-state": {
+        "title": "Estado del Container",
+        "icon": "📦",
+        "subtitle": "Diagnostico detallado del Azure Container Instance",
+        "prompt": (
+            "Ejecuta directamente el job template id={jt_aci_state} "
+            "(talento-aci-state) con extra_vars_json='{{}}'. Cuando termine, "
+            "sintetiza: nombre del container, state actual (Running/...), "
+            "restartCount, ultimo evento, recursos asignados. Indica si hay "
+            "senales de problema (state != Running, restartCount alto, eventos "
+            "BackOff/Failed)."
+        ),
+        "expected_jt": JT_IDS["jt_aci_state"],
+        "renderer": "generic",
+        "pain_point": "Diagnostico foco-container (caso de uso 4.1)",
+        "card_class": "card-info",
+        "free_text": False,
+        "accepts_filters": [],
+    },
+    "appservice-state": {
+        "title": "Estado del App Service",
+        "icon": "🌐",
+        "subtitle": "Diagnostico del Azure App Service (API backend)",
+        "prompt": (
+            "Ejecuta directamente el job template id={jt_appservice_state} "
+            "(talento-appservice-state) con extra_vars_json='{{}}'. Cuando "
+            "termine, sintetiza: estado del App Service (Running/Stopped), "
+            "availability (Normal/Limited/...), host name, ultimo modify. "
+            "Indica si hay senales de problema."
+        ),
+        "expected_jt": JT_IDS["jt_appservice_state"],
+        "renderer": "generic",
+        "pain_point": "Diagnostico foco-API (caso de uso 4.1)",
+        "card_class": "card-info",
+        "free_text": False,
+        "accepts_filters": [],
+    },
+    "sql-health": {
+        "title": "Salud de Base de Datos",
+        "icon": "🗄️",
+        "subtitle": "Estado del SQL Server y bases de datos",
+        "prompt": (
+            "Ejecuta directamente el job template id={jt_sql_health} "
+            "(talento-sql-health) con extra_vars_json='{{}}'. Cuando termine, "
+            "sintetiza: SQL Server name + fqdn, lista de databases con su "
+            "status (Online/...), tier/SKU (S2, S3, etc.) y tamaño max. "
+            "Indica si hay algo no-Online o alguna DB cerca del limite."
+        ),
+        "expected_jt": JT_IDS["jt_sql_health"],
+        "renderer": "generic",
+        "pain_point": "Diagnostico foco-BD (caso de uso 4.1)",
+        "card_class": "card-info",
+        "free_text": False,
+        "accepts_filters": [],
+    },
+    # ──────────────────────────────────────────────────────────────
+    # AUTO-REMEDIACION — accion (DRY-RUN por defecto)
+    # ──────────────────────────────────────────────────────────────
+    "auto-remediate-restart": {
+        "title": "Auto-Remediación: Restart",
+        "icon": "🔧",
+        "subtitle": "Reiniciar Container (DRY-RUN — confirma antes de ejecutar)",
+        "prompt": (
+            "Ejecuta directamente el job template id={jt_aci_restart} "
+            "(talento-aci-restart) con extra_vars_json='{{\"dry_run\": true, "
+            "\"reason\": \"Auto-remediacion propuesta por agente IA via "
+            "dashboard\"}}'. Esto NO va a reiniciar el container realmente — "
+            "es una simulacion (dry-run). Cuando termine, sintetiza: estado "
+            "actual del container, accion que SE EJECUTARIA si dry_run fuera "
+            "false, URL del API que se llamaria, e indica claramente al usuario "
+            "que para ejecutar de verdad debe re-correr con dry_run=false "
+            "(operacion bajo su responsabilidad)."
+        ),
+        "expected_jt": JT_IDS["jt_aci_restart"],
+        "renderer": "generic",
+        "pain_point": "Demo de auto-remediacion con safety pattern",
+        "card_class": "card-warning",
+        "free_text": False,
+        "accepts_filters": [],
     },
     "free-text": {
         "title": "Pregunta Libre",
