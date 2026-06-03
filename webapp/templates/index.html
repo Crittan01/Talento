@@ -53,7 +53,7 @@
   <!-- ============ Layout principal: sidebar + main ============ -->
   <main class="ecp-main" id="mainLayout">
 
-    <!-- ============ Sidebar izquierda con escenarios ============ -->
+    <!-- ============ Sidebar izquierda con escenarios + info ============ -->
     <aside class="ecp-sidebar" id="sidebar">
       <div class="ecp-sidebar__title">Escenarios</div>
       <div class="ecp-sidebar__list" id="cardsGrid">
@@ -85,6 +85,45 @@
           </div>
         </article>
         {% endfor %}
+      </div>
+
+      <div class="ecp-sidebar__title ecp-sidebar__title--info">Información del Sistema</div>
+      <div class="ecp-sidebar__list">
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="cert" title="Estado de certificación SOX del agente">
+          <div class="ecp-sidebar-card__icon">🔒</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">Certificación SOX</div>
+            <div class="ecp-sidebar-card__sub">50/50 PASS · v7-gpt4o-guard</div>
+          </div>
+        </article>
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="agent" title="Detalles del agente productivo">
+          <div class="ecp-sidebar-card__icon">🤖</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">Agente IA</div>
+            <div class="ecp-sidebar-card__sub">Modelo · Tools · Reglas · JTs</div>
+          </div>
+        </article>
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="knowledge" title="Base de conocimiento del agente">
+          <div class="ecp-sidebar-card__icon">📚</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">Knowledge Base</div>
+            <div class="ecp-sidebar-card__sub">Catálogo · Runbook · KQL · JT</div>
+          </div>
+        </article>
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="findings" title="Hallazgos abiertos con EAPPS">
+          <div class="ecp-sidebar-card__icon">⚠️</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">Hallazgos EAPPS</div>
+            <div class="ecp-sidebar-card__sub">2 puntos escalados</div>
+          </div>
+        </article>
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="runs" title="Historial de evaluaciones">
+          <div class="ecp-sidebar-card__icon">📈</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">Historial Runs</div>
+            <div class="ecp-sidebar-card__sub">Últimas evaluaciones</div>
+          </div>
+        </article>
       </div>
     </aside>
 
@@ -133,6 +172,17 @@
       <div class="ecp-result-wrap" id="resultWrap" style="display:none;">
         <h3 class="ecp-section-title">📋 Resultado estructurado</h3>
         <div class="ecp-result" id="result"></div>
+      </div>
+
+      <!-- Info view (visible cuando se selecciona una card de Información del Sistema) -->
+      <div class="ecp-infoview" id="infoView" style="display:none;">
+        <div class="ecp-infoview__header">
+          <h2 class="ecp-infoview__title" id="infoViewTitle">Información</h2>
+          <button class="ecp-runbanner__close" id="infoViewClose" title="Cerrar y volver">✕</button>
+        </div>
+        <div class="ecp-infoview__body" id="infoViewBody">
+          <div class="ecp-infoview__loading">Cargando…</div>
+        </div>
       </div>
 
     </section>

@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import bridge_runner, mock_events
+from . import bridge_runner, info_views, mock_events
 from .event_bus import bus
 from .scenarios import list_scenarios, resolve_prompt, get_scenario, get_default_filters
 
@@ -127,6 +127,48 @@ async def api_scenarios():
         "force_mock": _force_mock(),
         "default_filters": get_default_filters(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Info views — 5 paneles informativos sobre el estado del agente y certificacion
+# ---------------------------------------------------------------------------
+@app.get("/api/info/cert")
+async def api_info_cert():
+    """Resumen de certificacion SOX 50/50 + portal Foundry."""
+    return info_views.cert_summary()
+
+
+@app.get("/api/info/agent")
+async def api_info_agent():
+    """Info expandida del agente productivo (version, modelo, tools, reglas, JTs)."""
+    return info_views.agent_info()
+
+
+@app.get("/api/info/knowledge")
+async def api_info_knowledge():
+    """Lista de archivos de knowledge base disponibles."""
+    return info_views.knowledge_index()
+
+
+@app.get("/api/info/knowledge/{file_id}")
+async def api_info_knowledge_file(file_id: str):
+    """Contenido de un archivo de knowledge (Markdown)."""
+    data = info_views.knowledge_file(file_id)
+    if data is None:
+        raise HTTPException(404, f"Knowledge file no encontrado: {file_id}")
+    return data
+
+
+@app.get("/api/info/findings")
+async def api_info_findings():
+    """Hallazgos abiertos con EAPPS (datos empiricos validados)."""
+    return info_views.eapps_findings()
+
+
+@app.get("/api/info/runs")
+async def api_info_runs():
+    """Historial de runs de evaluation con scores agregados."""
+    return info_views.runs_history()
 
 
 @app.post("/api/run")

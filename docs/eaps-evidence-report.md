@@ -1,5 +1,5 @@
 # Evidencia de gaps de telemetria TALENTO
-_Generado: 2026-05-28 22:36 UTC · Workspace: `9e0a97a6-6839-4507-aae4-e4d706d1c320` · Rango: ultimos 7 dias_
+_Generado: 2026-06-01 19:16 UTC · Workspace: `9e0a97a6-6839-4507-aae4-e4d706d1c320` · Rango: ultimos 7 dias_
 
 Este reporte es **evidencia empirica** del estado actual de la telemetria emitida por la app TALENTO (simulada por EAPS). Sustenta el pedido formal de robustecimiento al equipo EAPS — no es opinion, son datos del workspace real.
 
@@ -12,10 +12,10 @@ _Lista TODAS las tablas con datos. Identifica si Application Insights esta o no 
 Tablas con datos en los ultimos 7 dias: **4**
 | Tabla | Registros | Primera | Ultima |
 | --- | --- | --- | --- |
-| AzureDiagnostics | 5295 | 2026-05-23T00:32:20.5706237Z | 2026-05-28T22:34:41.1874199Z |
-| ContainerInstanceLog_CL | 1787 | 2026-05-22T13:33:47.1021456Z | 2026-05-27T15:23:21.4882531Z |
-| Usage | 66 | 2026-05-22T14:00:00Z | 2026-05-28T22:00:00Z |
-| ContainerEvent_CL | 35 | 2026-05-22T13:09:23.5890619Z | 2026-05-24T05:28:25.9052897Z |
+| AzureDiagnostics | 17207 | 2026-05-25T19:17:08.9400514Z | 2026-06-01T19:15:43.7979359Z |
+| ContainerInstanceLog_CL | 230 | 2026-05-26T13:12:36.8965133Z | 2026-05-30T21:43:35.1350888Z |
+| Usage | 144 | 2026-05-25T20:00:00Z | 2026-06-01T18:00:00Z |
+| ContainerEvent_CL | 5 | 2026-05-30T21:42:57.9551364Z | 2026-05-30T21:43:26.0405241Z |
 
 > ⚠️ **No hay tablas `App*` (Application Insights)**: la app TALENTO NO esta instrumentada con App Insights. Las tablas operativas estandar (`AppExceptions`, `AppRequests`, `AppTraces`, `AppDependencies`) estan ausentes. Esto es el **gap mas critico**.
 
@@ -89,14 +89,13 @@ Muestreo de N=100 mensajes aleatorios:
 
 | Categoria | Count | % |
 | --- | --- | --- |
-| otro | 42 | 42.0% |
-| business_event | 26 | 26.0% |
-| error_or_warn | 17 | 17.0% |
-| framework_boot | 14 | 14.0% |
-| stack_trace | 1 | 1.0% |
-| vacio_o_decorativo | 0 | 0.0% |
+| business_event | 48 | 48.0% |
+| otro | 26 | 26.0% |
+| error_or_warn | 22 | 22.0% |
+| framework_boot | 3 | 3.0% |
+| vacio_o_decorativo | 1 | 1.0% |
+| stack_trace | 0 | 0.0% |
 
-> ⚠️ **Solo 26.0% de los logs son eventos de negocio identificables.** El resto es ruido de framework/stack traces. Para el agente, esto significa que la mayoria del log es 'inutil' para diagnostico funcional. **Pedir a EAPS niveles de log diferenciados o filtros logback que reduzcan ruido.**
 
 ---
 
@@ -114,41 +113,41 @@ Codigos detectados: **0**
 
 _Mide si pocos mensajes-template dominan (= logs estructurados) o hay alta variedad (= logs ad-hoc)._
 
-Total logs en 7d: **1,787**
-Top 30 templates cubren: **23.2%** del total
+Total logs en 7d: **230**
+Top 30 templates cubren: **13.9%** del total
 
 | Template | Count |
 | --- | --- |
-| 	at org.springframework.boot.SpringApplication.run(SpringApplication.java:<N>) ~[spring-boot-4.0.6.jar!/:4.0.6] | 36 |
-| 	at org.hibernate.engine.jdbc.spi.SqlExceptionHelper.convert(SqlExceptionHelper.java:<N>) ~[hibernate-core-7.2.12.Fin... | 24 |
-| 	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapab... | 18 |
-| 	at org.springframework.orm.jpa.AbstractEntityManagerFactoryBean.buildNativeEntityManagerFactory(AbstractEntityManage... | 18 |
-| 	at org.hibernate.resource.transaction.backend.jdbc.internal.DdlTransactionIsolatorNonJtaImpl.getIsolatedConnection(D... | 18 |
-| No se pudo enviar la notificacion por correo: Authentication failed | 13 |
-| 	at org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:<N>) ~[spring-be... | 12 |
-| 	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.invokeInitMethods(AbstractAutowireCa... | 12 |
-| 	at org.springframework.boot.SpringApplication.refresh(SpringApplication.java:<N>) ~[spring-boot-4.0.6.jar!/:4.0.6] | 12 |
-| 	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.doCreateBean(AbstractAutowireCapable... | 12 |
-| 	at org.springframework.boot.SpringApplication.refreshContext(SpringApplication.java:<N>) ~[spring-boot-4.0.6.jar!/:4... | 12 |
-| 	at org.springframework.orm.jpa.AbstractEntityManagerFactoryBean.afterPropertiesSet(AbstractEntityManagerFactoryBean.... | 12 |
-| 	at org.springframework.boot.loader.launch.Launcher.launch(Launcher.java:64) ~[app.jar:0.0.1-SNAPSHOT] | 12 |
-| 	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(AbstractAutowireCapableBe... | 12 |
-| 	at org.springframework.beans.factory.support.AbstractBeanFactory.lambda$doGetBean$0(AbstractBeanFactory.java:<N>) ~[... | 12 |
-| 	at org.hibernate.exception.internal.SQLStateConversionDelegate.convert(SQLStateConversionDelegate.java:63) ~[hiberna... | 12 |
-| 	at org.springframework.beans.factory.support.DefaultSingletonBeanRegistry.getSingleton(DefaultSingletonBeanRegistry.... | 12 |
-| 	at org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean.createNativeEntityManagerFactory(LocalContaine... | 12 |
-| 	at org.springframework.context.support.AbstractApplicationContext.finishBeanFactoryInitialization(AbstractApplicatio... | 12 |
-| 	at org.springframework.orm.jpa.vendor.SpringHibernateJpaPersistenceProvider.createContainerEntityManagerFactory(Spri... | 12 |
-| 	at org.springframework.boot.loader.launch.JarLauncher.main(JarLauncher.java:40) ~[app.jar:0.0.1-SNAPSHOT] | 12 |
-| 	at com.nttdata.ecopetrol.talento.TalentoApplication.main(TalentoApplication.java:10) ~[!/:0.0.1-SNAPSHOT] | 12 |
-| 	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(Unknown Source) ~[na:na] | 12 |
-| 	at java.base/java.lang.reflect.Method.invoke(Unknown Source) ~[na:na] | 12 |
-| 	at org.hibernate.exception.internal.StandardSQLExceptionConverter.convert(StandardSQLExceptionConverter.java:34) ~[h... | 12 |
-| 	at org.springframework.boot.loader.launch.Launcher.launch(Launcher.java:<N>) ~[app.jar:0.0.1-SNAPSHOT] | 12 |
-| 	at org.springframework.context.support.AbstractApplicationContext.refresh(AbstractApplicationContext.java:<N>) ~[spr... | 12 |
-| 	at org.springframework.beans.factory.support.AbstractBeanFactory.getBean(AbstractBeanFactory.java:<N>) ~[spring-bean... | 12 |
-| 	at org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext.refresh(ServletWebServerAp... | 12 |
-| 	at org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean.afterPropertiesSet(LocalContainerEntityManager... | 12 |
+| No se pudo enviar la notificacion por correo: Authentication failed | 3 |
+| <N>-05-26T13:14:45.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-1] c.n.e.t.controller.TalentoController     : Solicitud ... | 1 |
+| <N>-05-26T13:12:36.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-2] c.n.e.t.controller.TalentoController     : Login exit... | 1 |
+| <N>-05-26T13:29:55.<N>Z  INFO 18 --- [talento] [io-<N>-exec-10] c.n.e.t.controller.TalentoController     : Solicitud ... | 1 |
+| <N>-05-26T13:14:45.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-1] c.n.e.t.controller.TalentoController     : Login exit... | 1 |
+| <N>-05-26T13:29:41.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-8] c.n.e.t.controller.TalentoController     : Solicitud ... | 1 |
+| <N>-05-26T13:29:41.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-8] c.n.e.t.controller.TalentoController     : Login exit... | 1 |
+|  =========\|_\|==============\|___/=/_/_/_/ | 1 |
+| <N>-05-27T15:23:21.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-4] c.n.e.t.controller.TalentoController     : Listando t... | 1 |
+| <N>-05-30T21:42:57.<N>Z  INFO 18 --- [talento] [ionShutdownHook] o.s.boot.tomcat.GracefulShutdown         : Commencin... | 1 |
+|   .   ____          _            __ _ _ | 1 |
+|  /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \ | 1 |
+| ( ( )\___ \| '_ \| '_\| \| '_ \/ _` \| \ \ \ \ | 1 |
+|  \\/  ___)\| \|_)\| \| \| \| \| \|\| (_\| \|  ) ) ) ) | 1 |
+|   '  \|____\| .__\|_\| \|_\|_\| \|_\__, \| / / / / | 1 |
+| <N>-05-26T19:13:27.<N>Z  INFO 18 --- [talento] [nio-<N>-exec-5] c.n.e.t.controller.TalentoController     : Solicitud ... | 1 |
+|  :: Spring Boot ::                (v4.0.6) | 1 |
+| <N>-05-30T21:43:28.<N>Z  INFO 19 --- [talento] [           main] c.n.e.talento.TalentoApplication         : Starting ... | 1 |
+| <N>-05-30T21:43:28.<N>Z  INFO 19 --- [talento] [           main] c.n.e.talento.TalentoApplication         : No active... | 1 |
+| <N>-05-30T21:43:30.<N>Z  INFO 19 --- [talento] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrap... | 1 |
+| <N>-05-30T21:43:30.<N>Z  INFO 19 --- [talento] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished ... | 1 |
+| <N>-05-30T21:43:31.<N>Z  INFO 19 --- [talento] [           main] o.s.boot.tomcat.TomcatWebServer          : Tomcat in... | 1 |
+| <N>-05-30T21:43:31.<N>Z  INFO 19 --- [talento] [           main] o.apache.catalina.core.StandardService   : Starting ... | 1 |
+| <N>-05-30T21:43:31.<N>Z  INFO 19 --- [talento] [           main] o.apache.catalina.core.StandardEngine    : Starting ... | 1 |
+| <N>-05-30T21:43:31.<N>Z  INFO 19 --- [talento] [           main] b.w.c.s.WebApplicationContextInitializer : Root WebA... | 1 |
+| <N>-05-30T21:43:32.<N>Z  INFO 19 --- [talento] [           main] org.hibernate.orm.jpa                    : HHH<N>: P... | 1 |
+| <N>-05-30T21:43:33.<N>Z  INFO 19 --- [talento] [           main] org.hibernate.orm.core                   : HHH<N>: H... | 1 |
+| <N>-05-30T21:43:34.<N>Z  INFO 19 --- [talento] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTi... | 1 |
+| <N>-05-30T21:43:34.<N>Z  INFO 19 --- [talento] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPoo... | 1 |
+| <N>-05-30T21:43:35.<N>Z  INFO 19 --- [talento] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPoo... | 1 |
 
 > ⚠️ **Alta cardinalidad de mensajes** (el top-30 cubre <60%). Sugiere logs muy ad-hoc, no estructurados. **Pedir a EAPS pattern de logs estructurados (JSON con `message_template` fijo + variables aparte).**
 
@@ -160,12 +159,12 @@ _Detecta presencia de UUIDs, ClientConnectionId, request_id, traceparent. Esenci
 
 | Tipo de ID | Count | % de logs |
 | --- | --- | --- |
-| UUID generico | 62 | 3.5% |
-| ClientConnectionId (SQL) | 62 | 3.5% |
+| UUID generico | 1 | 0.4% |
+| ClientConnectionId (SQL) | 1 | 0.4% |
 | request_id / X-Request-ID / traceparent / trace_id | 0 | 0.0% |
 | span_id | 0 | 0.0% |
 
-Total logs analizados: **1,787**
+Total logs analizados: **230**
 
 > ⚠️ **NO hay correlation IDs ni distributed tracing.** El agente no puede seguir una transaccion HTTP -> microservicio -> BD -> SAP. **Pedir a EAPS: propagar `traceparent` (W3C Trace Context) o al menos `X-Request-ID` end-to-end. Integrar OpenTelemetry o Spring Sleuth.**
 
@@ -177,15 +176,12 @@ _Verifica si las severidades estan bien marcadas o si la mayoria es 'OTHER'._
 
 | Severidad | Count | % |
 | --- | --- | --- |
-| OTHER | 1,069 | 59.8% |
-| INFO | 477 | 26.7% |
-| WARN | 127 | 7.1% |
-| EXCEPTION | 90 | 5.0% |
-| ERROR | 24 | 1.3% |
+| INFO | 176 | 76.5% |
+| WARN | 41 | 17.8% |
+| OTHER | 13 | 5.7% |
 
-Total: **1,787**
+Total: **230**
 
-> ⚠️ **59.8% de logs sin severidad detectable.** Spring Boot suele incluir ` INFO `/` WARN `/` ERROR ` en el formato estandar; este % sugiere logs sin patron consistente. **Pedir a EAPS: log pattern unificado con severity en posicion fija.**
 
 ---
 
@@ -195,15 +191,15 @@ _Que fraccion del log es eventos de procesos reales (vacaciones, login, aprobaci
 
 | Categoria | Count | % |
 | --- | --- | --- |
-| otro | 844 | 47.2% |
-| boot_framework | 695 | 38.9% |
-| auth_login | 154 | 8.6% |
-| incapacidades | 39 | 2.2% |
-| errores | 25 | 1.4% |
-| calamidades | 20 | 1.1% |
-| aprobaciones | 10 | 0.6% |
+| otro | 163 | 70.9% |
+| incapacidades | 23 | 10.0% |
+| auth_login | 22 | 9.6% |
+| boot_framework | 9 | 3.9% |
+| calamidades | 8 | 3.5% |
+| errores | 3 | 1.3% |
+| aprobaciones | 2 | 0.9% |
 
-Total: **1,787**
+Total: **230**
 
 
 ---
@@ -212,7 +208,7 @@ Total: **1,787**
 
 _Cuantos logs incluyen duraciones/timing. Importante para responder preguntas de performance._
 
-Logs con metricas de latencia (ms/duration/elapsed/took): **18** de 1,787 (1.0%)
+Logs con metricas de latencia (ms/duration/elapsed/took): **2** de 230 (0.9%)
 
 > ⚠️ **<5% de logs incluyen timing.** El agente no puede responder 'cuanto tarda X' sin metricas. **Pedir a EAPS: Application Insights con request duration auto-track + custom metrics para operaciones criticas (cierre nomina, validacion).**
 
@@ -222,17 +218,14 @@ Logs con metricas de latencia (ms/duration/elapsed/took): **18** de 1,787 (1.0%)
 
 _Eventos de orquestacion de container (BackOff, Terminating, etc.) - util para diagnostico de infra._
 
-Eventos de container distintos: **7**
+Eventos de container distintos: **4**
 
 | ContainerName_s | Reason_s | Count |
 | --- | --- | --- |
-| aci-centralecopetrol | Started | 10 |
-| aci-centralecopetrol | BackOff | 6 |
-| aci-centralecopetrol | Terminating | 6 |
-| aci-centralecopetrol | Pulling | 4 |
-| aci-centralecopetrol | Stopping | 4 |
-| aci-centralecopetrol | Pulled | 4 |
-| aci-centralecopetrol | Killing | 1 |
+| aci-centralecopetrol | Stopping | 2 |
+| aci-centralecopetrol | Pulling | 1 |
+| aci-centralecopetrol | Started | 1 |
+| aci-centralecopetrol | Pulled | 1 |
 
 ---
 

@@ -1031,3 +1031,300 @@ body {
   from { opacity: 0; transform: scale(0.85); }
   to { opacity: 1; transform: scale(1); }
 }
+
+/* ============================================================================
+   Sidebar — sección "Información del Sistema" (5 vistas info)
+   ============================================================================ */
+.ecp-sidebar__title--info {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--neutral-bg);
+}
+.ecp-sidebar-card--info {
+  background: linear-gradient(135deg, #fafbfc, #f4f6f9);
+  border-left: 3px solid var(--ecp-dark-teal);
+}
+.ecp-sidebar-card--info:hover {
+  background: linear-gradient(135deg, #fff, #ecf2f1);
+  border-left-color: var(--ecp-yellow);
+}
+.ecp-sidebar-card--info.is-active {
+  background: var(--ecp-dark-teal);
+  color: #fff;
+  border-left-color: var(--ecp-yellow);
+}
+.ecp-sidebar-card--info.is-active .ecp-sidebar-card__sub {
+  color: var(--ecp-lime);
+}
+
+/* ============================================================================
+   Info view — contenedor principal cuando se abre una vista de info
+   ============================================================================ */
+.ecp-infoview {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 66, 54, 0.08);
+  padding: 0;
+  overflow: hidden;
+}
+.ecp-infoview__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--ecp-dark-teal);
+  color: #fff;
+  padding: 14px 20px;
+}
+.ecp-infoview__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+.ecp-infoview__body {
+  padding: 20px 24px;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+}
+.ecp-infoview__loading,
+.ecp-infoview__error {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.ecp-infoview__error {
+  color: #c1442e;
+  font-family: 'Consolas', monospace;
+}
+
+/* ----- Bloques internos ----- */
+.info-block h4 {
+  margin: 20px 0 10px;
+  color: var(--ecp-dark-teal);
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 2px solid var(--ecp-lime);
+  padding-bottom: 4px;
+}
+.info-block h5 {
+  margin: 14px 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.info-block p {
+  margin: 8px 0;
+  line-height: 1.5;
+  color: #34495e;
+}
+
+/* ----- Summary cards en grid ----- */
+.info-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 4px 0 18px;
+}
+.info-summary__metric {
+  background: linear-gradient(135deg, #f4f8fa, #ecf1f4);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 3px solid var(--ecp-lime);
+}
+.info-summary__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.info-summary__value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ecp-dark-teal);
+  word-break: break-word;
+}
+.info-summary__value--pass {
+  color: #1f7a4d;
+}
+.info-summary__value code {
+  font-size: 13px;
+}
+
+/* ----- Tablas ----- */
+.info-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 16px;
+  font-size: 13px;
+}
+.info-table thead th {
+  background: var(--ecp-dark-teal);
+  color: #fff;
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.info-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--neutral-bg);
+}
+.info-table tbody tr:hover {
+  background: #f7fafa;
+}
+.info-table code {
+  background: #eef2f5;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.info-table--compact td, .info-table--compact th {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+/* ----- Listas ----- */
+.info-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 6px 0 14px;
+}
+.info-list li {
+  padding: 6px 10px;
+  border-left: 3px solid var(--neutral-bg);
+  margin-bottom: 4px;
+  background: #fafbfc;
+  border-radius: 0 4px 4px 0;
+}
+.info-list--rules li {
+  border-left-color: var(--ecp-yellow);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.info-list--files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.info-muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ----- Badges ----- */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.badge--pass { background: #d4f1e1; color: #1f7a4d; }
+.badge--fail { background: #fde2dd; color: #c1442e; }
+.badge--warn,
+.badge--media { background: #fff5d6; color: #8a6c1b; }
+.badge--alta { background: #fbd5cb; color: #b1340a; }
+.badge--dry { background: #f0e8fc; color: #5d3fbd; padding: 1px 6px; font-size: 10px; }
+
+/* ----- CTA portal Foundry ----- */
+.info-cta {
+  display: inline-block;
+  background: var(--ecp-yellow);
+  color: var(--ecp-dark-teal);
+  font-weight: 700;
+  padding: 8px 16px;
+  border-radius: 6px;
+  text-decoration: none;
+  margin: 4px 0 12px;
+  transition: transform 0.15s;
+}
+.info-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(247, 219, 23, 0.4);
+}
+
+/* ----- Findings ----- */
+.info-finding {
+  background: #fff;
+  border: 1px solid var(--neutral-bg);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+.info-finding--media { border-left: 4px solid #d8a531; }
+.info-finding--alta { border-left: 4px solid #c1442e; }
+.info-finding__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.info-finding__header h4 {
+  margin: 0;
+  border-bottom: none;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 15px;
+}
+.info-finding__request {
+  background: #fffbe6;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 12px;
+  border-left: 3px solid var(--ecp-yellow);
+  font-size: 13px;
+}
+
+/* ----- Knowledge viewer modal-like ----- */
+.info-btn-sm {
+  font-size: 11px !important;
+  padding: 4px 10px !important;
+}
+.info-knowledge-viewer {
+  margin-top: 18px;
+  border: 1px solid var(--neutral-bg);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.info-knowledge-viewer__header {
+  background: var(--ecp-dark-teal);
+  color: #fff;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+.info-knowledge-viewer__content {
+  padding: 16px;
+  background: #fafbfc;
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+.info-knowledge-viewer__content h1,
+.info-knowledge-viewer__content h2,
+.info-knowledge-viewer__content h3 {
+  color: var(--ecp-dark-teal);
+  margin-top: 16px;
+}
+.info-knowledge-viewer__content code {
+  background: #eef2f5;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
