@@ -343,38 +343,20 @@ def eapps_findings() -> dict:
             },
             {
                 "id": "3",
-                "title": f"Service Principal sin permisos sobre `{ACI_RG}`",
-                "severity": "alta",
+                "title": f"Service Principal con permisos sobre `{ACI_RG}` — RESUELTO",
+                "severity": "resuelto",
                 "summary": (
-                    f"El bridge ya inyecta el target modular hacia `{ACI_NAME}` en "
-                    f"`{ACI_RG}` como extra_vars, los playbooks usan `mandatory` "
-                    f"filter (no defaults hardcoded) y AWX recibe la solicitud "
-                    f"correctamente. Pero el Service Principal de Azure que ejecuta "
-                    "los Job Templates (bbd498f7-caed-4daa-a236-f12fd3a13461) solo "
-                    "tiene roles asignados sobre `rg-central-solucion-talento` (RG "
-                    "del ACI viejo) — no sobre el RG del ACI moderno. Smoke "
-                    "Health Check Completo (JT 55) falla con HTTP 403 de Azure ARM."
+                    f"El SP `logssolution` (bbd498f7-...) ya tiene rol Contributor "
+                    f"asignado sobre `{ACI_RG}` (asignado por admin Azure tras "
+                    f"escalado). Smoke Health Check Completo (JT 55) ejecuta "
+                    f"end-to-end exitosamente y reporta datos reales del ACI "
+                    f"moderno `{ACI_NAME}`."
                 ),
                 "evidence": [
-                    "Smoke v14: scenario=infra-health-check -> JT 55 ejecutado -> AWX status=failed.",
-                    f"Error reportado: 'cliente {bridge_l2.ENV.get('AZURE_CLIENT_ID','?')[:12]}... no tiene permisos para realizar la accion requerida sobre los recursos de Container Instances'.",
-                    f"Esto PRUEBA que la modularizacion funciona — el playbook intento operar sobre {ACI_RG} (no sobre el RG viejo).",
+                    "az role assignment list --include-inherited: Contributor sobre rg-central-solucion-talento2 confirmado.",
+                    "Smoke v14 post-asignacion: scenario=infra-health-check -> JT 55 job_id=482 -> AWX status=successful en 8.9s.",
+                    f"Artifacts: overall_severity=HEALTHY, ACI={ACI_NAME} Running restartCount=0, App Service Running Normal, SQL Online Standard.",
                 ],
-                "pending_action": (
-                    f"Asignar al SP los 11 roles necesarios sobre `{ACI_RG}` "
-                    "(equivalente al setup que existe en `rg-central-solucion-talento`)."
-                ),
-                "command_for_admin_azure": (
-                    "# Asignar Contributor al SP sobre el RG moderno (forma mas amplia)\n"
-                    f"az role assignment create --assignee {bridge_l2.ENV.get('AZURE_CLIENT_ID','<sp-id>')} "
-                    f"--role Contributor --scope $(az group show -n {ACI_RG} --query id -o tsv)\n"
-                    "# Alternativa minima (roles especificos):\n"
-                    "# - Microsoft.ContainerInstance/containerGroups/read\n"
-                    "# - Microsoft.ContainerInstance/containerGroups/restart/action\n"
-                    "# - Microsoft.ContainerInstance/containerGroups/stop/action\n"
-                    "# - Microsoft.ContainerInstance/containerGroups/start/action\n"
-                    "# (usar el JT talento-aci-permissions-test para validar)"
-                ),
             },
             {
                 "id": "4",
