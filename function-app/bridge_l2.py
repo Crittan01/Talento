@@ -162,7 +162,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v8-user-error-fields"  # v8: knowledge actualizado con campos JSON dedicados `usuario` y `error_code` + patrones KQL 11-14 para audit por usuario y brute force con datos reales
+CATALOG_VERSION = "v9-targeted-queries"  # v9: tool description query_log_analytics quita 'Primer hop SIEMPRE discovery' (forzaba descubrimientos masivos cuando el prompt pedia filtros directos) + truncate del KQL output (30 filas / 30K chars) para evitar context_length_exceeded del LLM
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -531,9 +531,15 @@ TOOL_QUERY_LA = FunctionTool(
     name="query_log_analytics",
     description=(
         "Ejecuta una consulta KQL contra el workspace de Log Analytics de "
-        "TALENTO. Usala para diagnostico, descubrimiento de tablas pobladas, "
-        "y verificacion de estado tras una accion. Primer hop SIEMPRE: "
-        "descubrimiento con 'union withsource=Tabla *'."
+        "TALENTO. Usala para diagnostico de logs, trazabilidad por "
+        "correlation_id, deteccion de codigos TLNT, auditoria por usuario, "
+        "spike detection, verificacion post-accion. Cuando el usuario provee "
+        "criterios especificos (correlation_id, usuario, codigo, ventana "
+        "corta) formula la query DIRECTAMENTE filtrada — NO ejecutes "
+        "discovery amplio tipo 'union withsource=Tabla *' antes. Si necesitas "
+        "explorar tablas, hazlo solo cuando el usuario pregunta de forma "
+        "abierta sin criterios. Para guias de KQL probadas consulta "
+        "file_search con 'patron KQL <caso>'."
     ),
     parameters={
         "type": "object",
@@ -719,10 +725,33 @@ def process_response_items(
                         "rows": result.get("rows", 0),
                         "elapsed_seconds": round(elapsed, 1),
                     })
+                # Truncar el output del KQL antes de pasarlo al LLM para evitar
+                # context_length_exceeded. Si la query devolvio muchas filas o
+                # logs grandes, mandamos solo las primeras N filas y avisamos
+                # al modelo que el resultado fue truncado. El JSON completo
+                # queda en el log para debug.
+                MAX_KQL_OUTPUT_CHARS = 30000  # ~7-8K tokens, seguro vs ventana
+                MAX_KQL_ROWS_IN_LLM = 30
+                truncated_result = dict(result)
+                truncated_result["data"] = (result.get("data") or [])[:MAX_KQL_ROWS_IN_LLM]
+                total_rows = result.get("rows", 0)
+                if total_rows > MAX_KQL_ROWS_IN_LLM:
+                    truncated_result["_truncated"] = (
+                        f"Se devolvieron {len(truncated_result['data'])} de {total_rows} "
+                        f"filas al modelo. Si necesitas mas, formula una query mas "
+                        f"especifica (mejores filtros, ventana mas corta, aggregation)."
+                    )
+                payload = json.dumps(truncated_result, ensure_ascii=False)
+                if len(payload) > MAX_KQL_OUTPUT_CHARS:
+                    payload = (
+                        payload[:MAX_KQL_OUTPUT_CHARS]
+                        + '..."], "_truncated":"output excedio limite de chars; '
+                        + 'agrega project/take/summarize a la query"}'
+                    )
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
-                    "output": json.dumps(result, ensure_ascii=False),
+                    "output": payload,
                 })
             elif item.name == "run_awx_job_template":
                 tpl = args.get("template_id")
