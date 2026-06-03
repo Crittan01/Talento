@@ -162,7 +162,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v10-schema-blindado"  # v10: tool description publica el esquema EXACTO (p.error_code, p.usuario, p.correlation_id, p.level, p.logger_name — sin inventos como ErrorCode/codigo_error/UserId) + truncate mas duro (10 filas / 10K chars + recorte por campo Message a 300 chars) + scenario correlation-trace blinda PASO 3 (file_search only para definir TLNT, no mas KQL ni discovery cuando hay 0 filas)
+CATALOG_VERSION = "v11-tools-especializadas"  # v11: refactor arquitectonico. El bridge construye la KQL (4 tools especializadas con parametros tipados: lookup_correlation_id, lookup_tlnt_code, audit_user_activity, detect_brute_force) en lugar de que el agente improvise KQL libre. query_log_analytics queda como escape hatch. Scenarios primary (correlation-trace, sox-audit, brute-force, user-activity) reescritos para llamar a la tool especializada en lugar de pedirle al agente que escriba KQL. Elimina la familia de errores 'invento de campos / discovery union*  / context_length_exceeded'
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -239,6 +239,105 @@ def get_la_token() -> str:
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
+
+
+# ============================================================================
+# Builders KQL parametrizados — el bridge construye la query, NO el agente.
+# Esta capa elimina la familia de errores donde el agente inventa columnas
+# top-level (ErrorCode, codigo_error), olvida `parse_json(Message)` o escapa a
+# `union withsource=Tabla *` sin filtros y revienta el context window.
+# Cada builder proyecta solo las columnas utiles y aplica `take` acotado.
+# ============================================================================
+def _escape(value: str) -> str:
+    """Sanea un valor de usuario antes de meterlo en KQL. Sin esto, un input
+    con comillas o backticks puede romper la query o, peor, inyectar KQL.
+    """
+    if value is None:
+        return ""
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
+    cid = _escape(correlation_id)
+    hours = max(1, min(int(time_range_hours or 12), 168))
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        f"| where Message has '{cid}'\n"
+        "| extend p = parse_json(Message)\n"
+        f"| where tostring(p.correlation_id) == '{cid}'\n"
+        "| project TimeGenerated, Tabla, "
+        "level = tostring(p.level), "
+        "error_code = tostring(p.error_code), "
+        "usuario = tostring(p.usuario), "
+        "logger = tostring(p.logger_name), "
+        "msg = substring(tostring(p.message), 0, 300)\n"
+        "| order by TimeGenerated asc\n"
+        "| take 30"
+    )
+
+
+def kql_tlnt_lookup(error_code: str, time_range_hours: int) -> str:
+    code = _escape(error_code)
+    hours = max(1, min(int(time_range_hours or 12), 168))
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        f"| extend codigo = coalesce(tostring(p.error_code), extract('(TLNT-[0-9]+)', 1, Message))\n"
+        f"| where codigo == '{code}'\n"
+        "| project TimeGenerated, Tabla, "
+        "usuario = tostring(p.usuario), "
+        "correlation_id = tostring(p.correlation_id), "
+        "level = tostring(p.level), "
+        "logger = tostring(p.logger_name), "
+        "msg = substring(tostring(p.message), 0, 300)\n"
+        "| order by TimeGenerated desc\n"
+        "| take 30"
+    )
+
+
+def kql_user_audit(usuario: str, time_range_hours: int) -> str:
+    user = _escape(usuario)
+    hours = max(1, min(int(time_range_hours or 12), 168))
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        f"| where Message has '{user}'\n"
+        "| extend p = parse_json(Message)\n"
+        f"| where tostring(p.usuario) == '{user}'\n"
+        "| summarize "
+        "total_eventos = count(), "
+        "errores = countif(tostring(p.level) == 'ERROR'), "
+        "warns = countif(tostring(p.level) == 'WARN'), "
+        "codigos = make_set(tostring(p.error_code), 10), "
+        "loggers = make_set(tostring(p.logger_name), 5), "
+        "primera_actividad = min(TimeGenerated), "
+        "ultima_actividad = max(TimeGenerated) "
+        "by usuario = tostring(p.usuario)\n"
+        "| take 5"
+    )
+
+
+def kql_brute_force(time_range_hours: int, threshold: int) -> str:
+    hours = max(1, min(int(time_range_hours or 12), 168))
+    thr = max(2, int(threshold or 5))
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        "| where tostring(p.error_code) in ('TLNT-002', 'TLNT-008', 'TLNT-011')\n"
+        "| extend usuario = tostring(p.usuario)\n"
+        "| where isnotempty(usuario)\n"
+        "| summarize fails = count(), "
+        "codigos = make_set(tostring(p.error_code)), "
+        "primera = min(TimeGenerated), "
+        "ultima = max(TimeGenerated) "
+        "by usuario\n"
+        f"| where fails >= {thr}\n"
+        "| order by fails desc\n"
+        "| take 30"
+    )
 
 
 def execute_kql(query: str) -> dict:
@@ -436,14 +535,24 @@ def build_system_instructions() -> str:
         "especializado en TALENTO: aplicacion Spring Boot de gestion de talento "
         "humano de Ecopetrol, en Azure, regulada por SOX, operacion 7x24. "
         "Componentes: Container Instance, App Service, Azure SQL, Log Analytics.\n\n"
-        "TIENES 3 TOOLS:\n\n"
-        "1. query_log_analytics(query): KQL contra Log Analytics. Los logs son "
-        "   JSON estructurado (campos: @timestamp, level, correlation_id, modulo, "
-        "   message, logger_name, thread_name; codigos TLNT-XXX en el message "
-        "   cuando aplique). ANTES de formular cualquier query, usa file_search "
-        "   con 'patrones KQL TALENTO' — hay una guia completa con queries "
-        "   probadas para parsing, filtros por nivel, trazabilidad por "
-        "   correlation_id, deteccion de codigos, spike detection y mas.\n\n"
+        "TIENES TOOLS ESPECIALIZADAS QUE TE EVITAN ESCRIBIR KQL:\n\n"
+        "1a. lookup_correlation_id(correlation_id, time_range_hours): reconstruye "
+        "    una peticion HTTP especifica. El bridge arma la KQL — tu solo das el "
+        "    UUID y las horas. USALA para todo escenario de 'investigar correlation_id'.\n\n"
+        "1b. lookup_tlnt_code(error_code, time_range_hours): muestra instancias "
+        "    recientes de un codigo TLNT-XXX con usuario, correlation_id y mensaje. "
+        "    USALA cuando quieras ver donde ocurrio un codigo concreto.\n\n"
+        "1c. audit_user_activity(usuario, time_range_hours): resumen agregado de "
+        "    actividad por usuario (eventos, errores, codigos vistos, primera y "
+        "    ultima actividad). USALA para auditoria SOX o duda sobre un usuario.\n\n"
+        "1d. detect_brute_force(time_range_hours, threshold): usuarios con N o "
+        "    mas fallos de auth (TLNT-002/008/011). USALA para sospecha de brute "
+        "    force.\n\n"
+        "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de las "
+        "    4 anteriores cubre el caso (queries ad-hoc del operador en escenario "
+        "    'tlnt-lookup' libre). Para correlation_id, codigos TLNT, audit por "
+        "    usuario o brute force, USA SIEMPRE la tool especializada — escribir "
+        "    KQL libre cuando hay una especializada se considera error.\n\n"
         "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
         "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
         "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
@@ -576,6 +685,125 @@ TOOL_QUERY_LA = FunctionTool(
     strict=True,
 )
 
+# ============================================================================
+# Tools especializadas — el agente elige cual llamar y con que parametros.
+# El bridge construye la KQL parametrizada (con parse_json, project, take).
+# Esto elimina la familia de errores donde el agente improvisa esquema o
+# revienta el context window. query_log_analytics queda como escape hatch.
+# ============================================================================
+TOOL_LOOKUP_CID = FunctionTool(
+    name="lookup_correlation_id",
+    description=(
+        "Recupera todos los eventos de una peticion HTTP a partir de su "
+        "correlation_id, en una ventana hacia atras. El bridge construye la "
+        "KQL optima (parse_json del campo Message + filtro exacto + project "
+        "de columnas utiles + orden cronologico ascendente + take 30) — NO "
+        "tienes que escribir KQL ni preocuparte por nombres de campos. Usala "
+        "para reconstruir el viaje de una peticion identificada por su UUID "
+        "de correlacion. Si devuelve 0 filas, el correlation_id no aparece "
+        "en logs en esa ventana — no insistas con discovery, sugiere "
+        "ampliar la ventana o validar el UUID."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "correlation_id": {
+                "type": "string",
+                "description": "UUID de correlacion exacto (ej. 870648ea-9cf2-4ed8-bf76-8251408c5808).",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras en horas (default 12, max 168).",
+            },
+        },
+        "required": ["correlation_id", "time_range_hours"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_LOOKUP_TLNT = FunctionTool(
+    name="lookup_tlnt_code",
+    description=(
+        "Recupera ocurrencias recientes de un codigo TLNT-XXX en logs, "
+        "ordenadas por TimeGenerated desc. Bridge construye la KQL con "
+        "fallback regex para logs viejos sin campo error_code estructurado. "
+        "Devuelve columnas proyectadas (TimeGenerated, Tabla, usuario, "
+        "correlation_id, level, logger, msg recortado). Usala cuando quieras "
+        "ver instancias concretas del codigo en el periodo."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "error_code": {
+                "type": "string",
+                "description": "Codigo TLNT exacto, ej. 'TLNT-008'.",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras (default 12, max 168).",
+            },
+        },
+        "required": ["error_code", "time_range_hours"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_AUDIT_USER = FunctionTool(
+    name="audit_user_activity",
+    description=(
+        "Resumen agregado de actividad de un usuario: total eventos, errores, "
+        "warns, set de codigos TLNT, set de loggers, primera y ultima "
+        "actividad en la ventana. Bridge agrega `summarize` en KQL — NO "
+        "devuelve eventos crudos. Usala para auditoria SOX por usuario o "
+        "verificar si un usuario tuvo actividad sospechosa."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "usuario": {
+                "type": "string",
+                "description": "Nombre de usuario exacto como aparece en p.usuario (ej. 'nvivas').",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras (default 12, max 168).",
+            },
+        },
+        "required": ["usuario", "time_range_hours"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_BRUTE_FORCE = FunctionTool(
+    name="detect_brute_force",
+    description=(
+        "Detecta usuarios con N o mas fallos de autenticacion (TLNT-002 "
+        "credenciales invalidas, TLNT-008 token expirado, TLNT-011 cuenta "
+        "bloqueada) en la ventana, agrupados por usuario. Bridge construye "
+        "summarize por usuario. Sin parametros libres ni KQL. Usala para "
+        "detectar brute force / accesos sospechosos."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras (default 12, max 168).",
+            },
+            "threshold": {
+                "type": "integer",
+                "description": "Minimo de fallos para considerar sospechoso (default 5).",
+            },
+        },
+        "required": ["time_range_hours", "threshold"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 def build_tool_run_awx() -> FunctionTool:
     """Tool spec con descripcion construida con los JT IDs activos."""
     j = JT_IDS
@@ -682,7 +910,14 @@ def ensure_knowledge_vector_store(project: AIProjectClient) -> Optional[str]:
 
 
 def setup_agent_version(project: AIProjectClient):
-    tools = [TOOL_QUERY_LA, build_tool_run_awx()]
+    tools = [
+        TOOL_LOOKUP_CID,
+        TOOL_LOOKUP_TLNT,
+        TOOL_AUDIT_USER,
+        TOOL_BRUTE_FORCE,
+        TOOL_QUERY_LA,
+        build_tool_run_awx(),
+    ]
     # Sumar FileSearchTool si el vector store del catalogo TLNT esta disponible
     vs_id = ensure_knowledge_vector_store(project)
     if vs_id:
@@ -700,6 +935,101 @@ def setup_agent_version(project: AIProjectClient):
 # ============================================================================
 # Procesamiento de respuestas (multi-hop)
 # ============================================================================
+# Cotas para el payload que pasa al LLM. El bridge ya proyecta columnas en las
+# tools especializadas, pero estas cotas son la red de seguridad si alguien
+# usa el escape query_log_analytics o si el `project` quedo flojo.
+_MAX_KQL_OUTPUT_CHARS = 10000
+_MAX_KQL_ROWS_IN_LLM = 10
+_MAX_FIELD_CHARS = 300
+_LARGE_FIELDS = ("Message", "RawData", "Body", "Payload", "data", "msg")
+
+
+def _shrink_row(row):
+    if not isinstance(row, dict):
+        return row
+    shrunk = {}
+    for k, v in row.items():
+        if isinstance(v, str) and k in _LARGE_FIELDS and len(v) > _MAX_FIELD_CHARS:
+            shrunk[k] = v[:_MAX_FIELD_CHARS] + f"...[+{len(v)-_MAX_FIELD_CHARS}ch]"
+        else:
+            shrunk[k] = v
+    return shrunk
+
+
+def _kql_result_to_payload(result: dict) -> str:
+    """Serializa el resultado KQL al payload que ve el LLM, con doble cota:
+    recorte por fila (campos textuales grandes) y por total (chars del JSON).
+    Devuelve siempre un string JSON valido.
+    """
+    total_rows = result.get("rows", 0)
+    rows_out = [_shrink_row(r) for r in (result.get("data") or [])[:_MAX_KQL_ROWS_IN_LLM]]
+    truncated = dict(result)
+    truncated["data"] = rows_out
+    if total_rows > _MAX_KQL_ROWS_IN_LLM:
+        truncated["_truncated"] = (
+            f"Se devolvieron {len(rows_out)} de {total_rows} filas al modelo. "
+            f"Reformula con parametros mas estrechos si necesitas mas detalle."
+        )
+    payload = json.dumps(truncated, ensure_ascii=False)
+    if len(payload) > _MAX_KQL_OUTPUT_CHARS:
+        payload = json.dumps({
+            "rows": total_rows,
+            "_truncated": (
+                f"Output excedio {_MAX_KQL_OUTPUT_CHARS} chars incluso tras recorte. "
+                f"Sample columns disponibles."
+            ),
+            "sample_columns": list(rows_out[0].keys()) if rows_out else [],
+        }, ensure_ascii=False)
+    return payload
+
+
+def _run_specialized_kql(
+    *, hop: int, tool_name: str, args_for_event: dict, query: str,
+    emit: Optional[Callable[[dict], None]], call_id: str,
+) -> dict:
+    """Handler comun a las tools especializadas: emite eventos del timeline,
+    ejecuta la KQL construida por el builder, trunca el payload de salida y
+    devuelve el dict listo para fn_outputs.
+    """
+    print(f"     KQL[{tool_name}]: {query[:160]}{'...' if len(query) > 160 else ''}")
+    _emit(emit, {
+        "type": "tool.call",
+        "hop": hop,
+        "tool": tool_name,
+        "args": args_for_event,
+    })
+    _emit(emit, {
+        "type": "tool.kql.query",
+        "hop": hop,
+        "query": query,
+        "built_by": "bridge",
+    })
+    t0 = time.time()
+    result = execute_kql(query)
+    elapsed = time.time() - t0
+    if "error" in result:
+        print(f"     ⚠️  KQL ERROR ({elapsed:.1f}s): {result['error']}")
+        _emit(emit, {
+            "type": "tool.kql.error",
+            "hop": hop,
+            "error": result.get("error"),
+            "elapsed_seconds": round(elapsed, 1),
+        })
+    else:
+        print(f"     ✓ KQL OK ({elapsed:.1f}s): {result['rows']} filas")
+        _emit(emit, {
+            "type": "tool.kql.done",
+            "hop": hop,
+            "rows": result.get("rows", 0),
+            "elapsed_seconds": round(elapsed, 1),
+        })
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": _kql_result_to_payload(result),
+    }
+
+
 def process_response_items(
     response,
     hop: int,
@@ -713,9 +1043,58 @@ def process_response_items(
         if itype == "function_call":
             args = json.loads(item.arguments)
             print(f"\n  🤖 hop {hop} → llama tool: {item.name}")
-            if item.name == "query_log_analytics":
+
+            # ---- Tools especializadas (bridge construye el KQL) ----
+            if item.name == "lookup_correlation_id":
+                cid = args.get("correlation_id", "")
+                hrs = int(args.get("time_range_hours") or 12)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                query = kql_correlation_id(cid, hrs)
+                fn_outputs.append(_run_specialized_kql(
+                    hop=hop, tool_name="lookup_correlation_id",
+                    args_for_event={"correlation_id": cid, "time_range_hours": hrs},
+                    query=query, emit=emit, call_id=item.call_id,
+                ))
+            elif item.name == "lookup_tlnt_code":
+                code = args.get("error_code", "")
+                hrs = int(args.get("time_range_hours") or 12)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                query = kql_tlnt_lookup(code, hrs)
+                fn_outputs.append(_run_specialized_kql(
+                    hop=hop, tool_name="lookup_tlnt_code",
+                    args_for_event={"error_code": code, "time_range_hours": hrs},
+                    query=query, emit=emit, call_id=item.call_id,
+                ))
+            elif item.name == "audit_user_activity":
+                usr = args.get("usuario", "")
+                hrs = int(args.get("time_range_hours") or 12)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                query = kql_user_audit(usr, hrs)
+                fn_outputs.append(_run_specialized_kql(
+                    hop=hop, tool_name="audit_user_activity",
+                    args_for_event={"usuario": usr, "time_range_hours": hrs},
+                    query=query, emit=emit, call_id=item.call_id,
+                ))
+            elif item.name == "detect_brute_force":
+                hrs = int(args.get("time_range_hours") or 12)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                thr = int(args.get("threshold") or 5)
+                if force_extra_vars and "failed_threshold" in force_extra_vars:
+                    thr = int(force_extra_vars["failed_threshold"])
+                query = kql_brute_force(hrs, thr)
+                fn_outputs.append(_run_specialized_kql(
+                    hop=hop, tool_name="detect_brute_force",
+                    args_for_event={"time_range_hours": hrs, "threshold": thr},
+                    query=query, emit=emit, call_id=item.call_id,
+                ))
+            # ---- Escape hatch: query_log_analytics (query libre) ----
+            elif item.name == "query_log_analytics":
                 kql = args.get("query", "")
-                print(f"     KQL: {kql}")
+                print(f"     KQL libre: {kql[:160]}{'...' if len(kql) > 160 else ''}")
                 _emit(emit, {
                     "type": "tool.call",
                     "hop": hop,
@@ -723,7 +1102,7 @@ def process_response_items(
                     "args": {"query": kql},
                 })
                 t0 = time.time()
-                result = execute_kql(args["query"])
+                result = execute_kql(kql)
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  KQL ERROR ({elapsed:.1f}s): {result['error']}")
@@ -741,54 +1120,10 @@ def process_response_items(
                         "rows": result.get("rows", 0),
                         "elapsed_seconds": round(elapsed, 1),
                     })
-                # Truncar el output del KQL antes de pasarlo al LLM para evitar
-                # context_length_exceeded acumulado a lo largo de varios hops.
-                # Los logs de ContainerInstanceLog_CL traen el JSON entero en
-                # el campo Message (1-5 KB cada uno) — N filas se vuelven
-                # ingestables solo si recortamos por fila Y por payload total.
-                MAX_KQL_OUTPUT_CHARS = 10000      # ~2.5K tokens / hop
-                MAX_KQL_ROWS_IN_LLM = 10          # con 10 hops max, da margen
-                MAX_FIELD_CHARS = 300             # recortar campos textuales grandes
-                LARGE_FIELDS = ("Message", "RawData", "Body", "Payload", "data")
-
-                def _shrink_row(row):
-                    if not isinstance(row, dict):
-                        return row
-                    shrunk = {}
-                    for k, v in row.items():
-                        if isinstance(v, str) and k in LARGE_FIELDS and len(v) > MAX_FIELD_CHARS:
-                            shrunk[k] = v[:MAX_FIELD_CHARS] + f"...[+{len(v)-MAX_FIELD_CHARS}ch]"
-                        else:
-                            shrunk[k] = v
-                    return shrunk
-
-                total_rows = result.get("rows", 0)
-                rows_out = [_shrink_row(r) for r in (result.get("data") or [])[:MAX_KQL_ROWS_IN_LLM]]
-                truncated_result = dict(result)
-                truncated_result["data"] = rows_out
-                if total_rows > MAX_KQL_ROWS_IN_LLM:
-                    truncated_result["_truncated"] = (
-                        f"Se devolvieron {len(rows_out)} de {total_rows} filas al modelo. "
-                        f"Si necesitas mas, agrega 'project' a la query para seleccionar "
-                        f"solo las columnas necesarias (level, error_code, usuario, "
-                        f"correlation_id, message, TimeGenerated), o reduce la ventana."
-                    )
-                payload = json.dumps(truncated_result, ensure_ascii=False)
-                if len(payload) > MAX_KQL_OUTPUT_CHARS:
-                    # Fallback duro si aun asi se pasa: corta y deja un marker JSON-valido.
-                    payload = json.dumps({
-                        "rows": total_rows,
-                        "_truncated": (
-                            f"Output excedio {MAX_KQL_OUTPUT_CHARS} chars incluso tras "
-                            f"recorte. Reformula la query con 'project' de columnas "
-                            f"especificas y 'take {min(5, MAX_KQL_ROWS_IN_LLM)}'."
-                        ),
-                        "sample_columns": list(rows_out[0].keys()) if rows_out else [],
-                    }, ensure_ascii=False)
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
-                    "output": payload,
+                    "output": _kql_result_to_payload(result),
                 })
             elif item.name == "run_awx_job_template":
                 tpl = args.get("template_id")
