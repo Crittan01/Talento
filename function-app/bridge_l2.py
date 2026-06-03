@@ -162,7 +162,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v9-targeted-queries"  # v9: tool description query_log_analytics quita 'Primer hop SIEMPRE discovery' (forzaba descubrimientos masivos cuando el prompt pedia filtros directos) + truncate del KQL output (30 filas / 30K chars) para evitar context_length_exceeded del LLM
+CATALOG_VERSION = "v10-schema-blindado"  # v10: tool description publica el esquema EXACTO (p.error_code, p.usuario, p.correlation_id, p.level, p.logger_name — sin inventos como ErrorCode/codigo_error/UserId) + truncate mas duro (10 filas / 10K chars + recorte por campo Message a 300 chars) + scenario correlation-trace blinda PASO 3 (file_search only para definir TLNT, no mas KQL ni discovery cuando hay 0 filas)
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -538,8 +538,24 @@ TOOL_QUERY_LA = FunctionTool(
         "corta) formula la query DIRECTAMENTE filtrada — NO ejecutes "
         "discovery amplio tipo 'union withsource=Tabla *' antes. Si necesitas "
         "explorar tablas, hazlo solo cuando el usuario pregunta de forma "
-        "abierta sin criterios. Para guias de KQL probadas consulta "
-        "file_search con 'patron KQL <caso>'."
+        "abierta sin criterios.\n\n"
+        "ESQUEMA REAL (validado con EAPPS — usa estos nombres EXACTOS, no "
+        "improvises traducciones):\n"
+        "  - El log estructurado vive en el campo `Message` (no `message`, "
+        "no `Body`) y SIEMPRE se decodifica con `extend p = parse_json(Message)`.\n"
+        "  - Codigo TLNT del catalogo: `tostring(p.error_code)` (en INGLES). "
+        "NO existe `codigo_error`, NO existe `ErrorCode` top-level.\n"
+        "  - Usuario afectado: `tostring(p.usuario)` (en ESPANOL). NO existe "
+        "`UserId`, NO existe `userName`.\n"
+        "  - Correlacion: `tostring(p.correlation_id)`.\n"
+        "  - Nivel de severidad: `tostring(p.level)` con valores ERROR/WARN/INFO.\n"
+        "  - Logger: `tostring(p.logger_name)`.\n"
+        "  - Fallback regex para logs viejos sin error_code estructurado: "
+        "`extract('(TLNT-[0-9]+)', 1, Message)`.\n\n"
+        "ANTES de mandar una query nueva con campos que no hayas usado en "
+        "este run, consulta file_search con 'patron KQL <caso>' (correlation_id, "
+        "audit usuario, brute force, conteo TLNT, etc.) y copia el patron "
+        "documentado en lugar de adivinar nombres."
     ),
     parameters={
         "type": "object",
@@ -726,28 +742,49 @@ def process_response_items(
                         "elapsed_seconds": round(elapsed, 1),
                     })
                 # Truncar el output del KQL antes de pasarlo al LLM para evitar
-                # context_length_exceeded. Si la query devolvio muchas filas o
-                # logs grandes, mandamos solo las primeras N filas y avisamos
-                # al modelo que el resultado fue truncado. El JSON completo
-                # queda en el log para debug.
-                MAX_KQL_OUTPUT_CHARS = 30000  # ~7-8K tokens, seguro vs ventana
-                MAX_KQL_ROWS_IN_LLM = 30
-                truncated_result = dict(result)
-                truncated_result["data"] = (result.get("data") or [])[:MAX_KQL_ROWS_IN_LLM]
+                # context_length_exceeded acumulado a lo largo de varios hops.
+                # Los logs de ContainerInstanceLog_CL traen el JSON entero en
+                # el campo Message (1-5 KB cada uno) — N filas se vuelven
+                # ingestables solo si recortamos por fila Y por payload total.
+                MAX_KQL_OUTPUT_CHARS = 10000      # ~2.5K tokens / hop
+                MAX_KQL_ROWS_IN_LLM = 10          # con 10 hops max, da margen
+                MAX_FIELD_CHARS = 300             # recortar campos textuales grandes
+                LARGE_FIELDS = ("Message", "RawData", "Body", "Payload", "data")
+
+                def _shrink_row(row):
+                    if not isinstance(row, dict):
+                        return row
+                    shrunk = {}
+                    for k, v in row.items():
+                        if isinstance(v, str) and k in LARGE_FIELDS and len(v) > MAX_FIELD_CHARS:
+                            shrunk[k] = v[:MAX_FIELD_CHARS] + f"...[+{len(v)-MAX_FIELD_CHARS}ch]"
+                        else:
+                            shrunk[k] = v
+                    return shrunk
+
                 total_rows = result.get("rows", 0)
+                rows_out = [_shrink_row(r) for r in (result.get("data") or [])[:MAX_KQL_ROWS_IN_LLM]]
+                truncated_result = dict(result)
+                truncated_result["data"] = rows_out
                 if total_rows > MAX_KQL_ROWS_IN_LLM:
                     truncated_result["_truncated"] = (
-                        f"Se devolvieron {len(truncated_result['data'])} de {total_rows} "
-                        f"filas al modelo. Si necesitas mas, formula una query mas "
-                        f"especifica (mejores filtros, ventana mas corta, aggregation)."
+                        f"Se devolvieron {len(rows_out)} de {total_rows} filas al modelo. "
+                        f"Si necesitas mas, agrega 'project' a la query para seleccionar "
+                        f"solo las columnas necesarias (level, error_code, usuario, "
+                        f"correlation_id, message, TimeGenerated), o reduce la ventana."
                     )
                 payload = json.dumps(truncated_result, ensure_ascii=False)
                 if len(payload) > MAX_KQL_OUTPUT_CHARS:
-                    payload = (
-                        payload[:MAX_KQL_OUTPUT_CHARS]
-                        + '..."], "_truncated":"output excedio limite de chars; '
-                        + 'agrega project/take/summarize a la query"}'
-                    )
+                    # Fallback duro si aun asi se pasa: corta y deja un marker JSON-valido.
+                    payload = json.dumps({
+                        "rows": total_rows,
+                        "_truncated": (
+                            f"Output excedio {MAX_KQL_OUTPUT_CHARS} chars incluso tras "
+                            f"recorte. Reformula la query con 'project' de columnas "
+                            f"especificas y 'take {min(5, MAX_KQL_ROWS_IN_LLM)}'."
+                        ),
+                        "sample_columns": list(rows_out[0].keys()) if rows_out else [],
+                    }, ensure_ascii=False)
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
