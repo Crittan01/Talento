@@ -24,7 +24,7 @@ equipo de Operaciones.
    Si tiene código → buscar en `talento_error_catalog.md` la definición
    y acción sugerida.
 
-4. Si NO hay códigos TLNT, ejecutar JT 33 (errors-analysis) para análisis
+4. Si NO hay códigos TLNT, ejecutar `talento-errors-analysis` para análisis
    más profundo de patrones.
 
 5. Sintetizar al operador:
@@ -32,7 +32,7 @@ equipo de Operaciones.
    - Top 3 mensajes
    - Códigos TLNT identificados (con definición)
    - Si hay un patrón claro, sugerir siguiente paso (ej. "todos los errores
-     son TLNT-002 desde la misma IP → posible brute force, considerar JT 35").
+     son TLNT-002 desde la misma IP → posible brute force, considerar `talento-brute-force-detector`").
 
 **NO ejecutar** ninguna acción de remediación automáticamente — solo proponer.
 
@@ -45,7 +45,7 @@ operador reporta "TALENTO no responde / se reinicia solo".
 
 **Pasos del agente**:
 
-1. Ejecutar JT 36 (aci-state) para obtener estado real:
+1. Ejecutar `talento-aci-state` para obtener estado real:
    - `state` actual (Running/Terminated/Pending/Waiting)
    - `restartCount`
    - Últimos eventos del container (BackOff, Killing, Pulling, etc.)
@@ -65,10 +65,10 @@ operador reporta "TALENTO no responde / se reinicia solo".
    → recomendar resize del container (manual, no automatizado).
 
 4. Si los logs muestran error de conexión (BD, dependencias):
-   → primero validar JT 38 (sql-health) y dependencias antes de restart.
+   → primero validar `talento-sql-health` y dependencias antes de restart.
 
 5. Si los logs muestran error transitorio o no hay causa clara:
-   → proponer restart con JT 40 en `dry_run=true`. Mostrar al operador
+   → proponer restart con `talento-aci-restart` en `dry_run=true`. Mostrar al operador
    qué pasaría. Pedir confirmación EXPLÍCITA para ejecutar real.
 
 6. NUNCA ejecutar restart automático sin confirmación humana — incluso si
@@ -86,7 +86,7 @@ correlacionar con SQL DTU alto.
 
 **Pasos del agente**:
 
-1. Ejecutar JT 38 (sql-health) para ver tier y estado de la DB.
+1. Ejecutar `talento-sql-health` para ver tier y estado de la DB.
    Si tier es S2 y la fecha es cerca al cierre mensual:
    → probable saturación de DTUs.
 
@@ -102,7 +102,7 @@ correlacionar con SQL DTU alto.
    - Escalar a equipo de infraestructura para resize manual
 
 4. Si la degradación es del container (no SQL):
-   - Validar restartCount con JT 36
+   - Validar restartCount con `talento-aci-state`
    - Validar memoria/CPU asignada (1 vCPU / 1.5 GB es bajo para picos)
    - Recomendar resize (manual)
 
@@ -118,7 +118,7 @@ TLNT-004, TLNT-008) o intentos excedidos (TLNT-011) en ventana corta.
 
 **Pasos del agente**:
 
-1. Ejecutar JT 35 (brute-force-detector) con default
+1. Ejecutar `talento-brute-force-detector` con default
    `{"failed_threshold": 5}`:
    → devuelve `bruteforce_severity` y lista de usuarios sospechosos.
 
@@ -181,7 +181,7 @@ de transacción ("a las 10:32 Juan no pudo aprobar vacaciones").
 
 **Pasos del agente**:
 
-1. Ejecutar JT 39 (full-health-check) — orchestrator de ACI + App Service + SQL.
+1. Ejecutar `talento-full-health-check` — orchestrator de ACI + App Service + SQL.
 
 2. Si `overall_severity` es HEALTHY:
    - Reportar como "todos los componentes saludables" + datos clave

@@ -1,20 +1,40 @@
 # Catálogo de Job Templates AWX para TALENTO
 
-Este documento describe los 12 Job Templates disponibles en AWX Azure
-(`http://172.210.65.202.nip.io`) que el agente puede invocar vía
-`run_awx_job_template(template_id, extra_vars_json)`.
+Este documento describe los 12 Job Templates disponibles en AWX, que el agente
+puede invocar vía `run_awx_job_template(template_id, extra_vars_json)`.
 
-Los IDs corresponden al deployment ACTUAL en AWX Azure. Si se cambia de AWX
-(ej. local), bump `CATALOG_VERSION` y re-subir este archivo.
+**IMPORTANTE — los IDs numéricos NO viven en este catálogo.** Cada perfil de
+despliegue (AWX local, AWX Azure productivo, futuros entornos) reasigna IDs.
+Los IDs reales del entorno activo están en la **`description` del tool
+`run_awx_job_template`** (que el bridge construye al runtime desde el `.env`).
+Aquí solo describimos *qué hace cada slug semántico*. Para mapear slug → ID
+numérico, consultar la tool description.
+
+Slugs canónicos (citables verbatim por el agente):
+
+| Slug | Categoría |
+|---|---|
+| `talento-workspace-snapshot` | Análisis logs |
+| `talento-errors-analysis` | Análisis logs |
+| `talento-sox-audit` | Análisis logs |
+| `talento-brute-force-detector` | Análisis logs |
+| `talento-aci-state` | Diagnóstico infra |
+| `talento-appservice-state` | Diagnóstico infra |
+| `talento-sql-health` | Diagnóstico infra |
+| `talento-full-health-check` | Diagnóstico infra |
+| `talento-aci-restart` | Remediación |
+| `talento-aci-stop` | Remediación |
+| `talento-aci-start` | Remediación |
+| `talento-appservice-restart` | Remediación |
 
 ---
 
 ## Categoría 1: Análisis de Logs (4 templates, NO invasivos)
 
-Estos templates ejecutan KQL contra Log Analytics y devuelven análisis
-agregado. NO modifican nada. Ejecutan en ~10-20s típicamente.
+Ejecutan KQL contra Log Analytics y devuelven análisis agregado. NO modifican
+nada. Ejecutan en ~10-20s típicamente.
 
-### JT 32 — talento-workspace-snapshot
+### talento-workspace-snapshot
 
 - **Propósito**: inventario amplio del workspace (qué tablas tienen datos,
   schema, muestra).
@@ -23,7 +43,7 @@ agregado. NO modifican nada. Ejecutan en ~10-20s típicamente.
 - **extra_vars_json**: `{"time_range_hours": 24}` (default 24).
 - **Output principal**: lista de tablas pobladas con conteos + top mensajes.
 
-### JT 33 — talento-errors-analysis
+### talento-errors-analysis
 
 - **Propósito**: análisis enfocado en ERROR/WARN agrupados por mensaje,
   containers afectados.
@@ -33,7 +53,7 @@ agregado. NO modifican nada. Ejecutan en ~10-20s típicamente.
 - **Output**: `severity_status`, conteo errors/warnings, top mensajes,
   containers afectados.
 
-### JT 34 — talento-sox-audit
+### talento-sox-audit
 
 - **Propósito**: auditoría SOX — logins por usuario, acciones privilegiadas
   con rol, incidentes de seguridad a nivel BD.
@@ -43,7 +63,7 @@ agregado. NO modifican nada. Ejecutan en ~10-20s típicamente.
 - **Output**: `audit_status` (SECURITY_INCIDENT / AUDIT_REVIEW / NORMAL),
   logins agrupados, acciones privilegiadas, failed SQL logins.
 
-### JT 35 — talento-brute-force-detector
+### talento-brute-force-detector
 
 - **Propósito**: detector específico de patrones de brute force (failed
   logins agrupados por usuario con umbral).
@@ -57,10 +77,10 @@ agregado. NO modifican nada. Ejecutan en ~10-20s típicamente.
 
 ## Categoría 2: Diagnóstico de Infraestructura (4 templates, NO invasivos)
 
-Estos consultan el Azure ARM API para leer ESTADO de recursos. Solo lectura,
+Consultan el Azure ARM API para leer ESTADO de recursos. Solo lectura,
 no modifican nada. Útil para complementar análisis de logs con estado real.
 
-### JT 36 — talento-aci-state
+### talento-aci-state
 
 - **Propósito**: estado actual del Container Instance de TALENTO.
 - **Cuándo usar**: "está vivo el container?", investigación de crash loops,
@@ -69,7 +89,7 @@ no modifican nada. Útil para complementar análisis de logs con estado real.
 - **Output**: state (Running/Terminated/Pending/...), restartCount, eventos
   recientes, CPU/memoria asignada, image.
 
-### JT 37 — talento-appservice-state
+### talento-appservice-state
 
 - **Propósito**: estado del App Service (frontend/API).
 - **Cuándo usar**: "la API responde?", health del App Service, availability.
@@ -77,7 +97,7 @@ no modifican nada. Útil para complementar análisis de logs con estado real.
 - **Output**: state (Running/Stopped), availability (Normal/Limited/...),
   host name, último deploy.
 
-### JT 38 — talento-sql-health
+### talento-sql-health
 
 - **Propósito**: estado del SQL Server + bases de datos.
 - **Cuándo usar**: "la BD está sana?", investigación de problemas de
@@ -86,7 +106,7 @@ no modifican nada. Útil para complementar análisis de logs con estado real.
 - **Output**: status del server, databases (Online/Offline), tier (S2/S3),
   tamaño usado.
 
-### JT 39 — talento-full-health-check
+### talento-full-health-check
 
 - **Propósito**: orchestrator que ejecuta los 3 anteriores (ACI + App Service
   + SQL) en una sola corrida.
@@ -109,7 +129,7 @@ qué SE EJECUTARÍA.
 **confirmación explícita** del operador humano (segunda solicitud con
 intent claro tipo "ejecuta de verdad" / "confirmo").
 
-### JT 40 — talento-aci-restart
+### talento-aci-restart
 
 - **Propósito**: reinicia el Container Instance de TALENTO.
 - **Cuándo usar**: container en BackOff/CrashLoop, memory leak detectado,
@@ -119,7 +139,7 @@ intent claro tipo "ejecuta de verdad" / "confirmo").
 - **Output**: estado antes/después, restartCount.
 - **Impacto**: ~30-60s de downtime de la app durante restart.
 
-### JT 41 — talento-aci-stop
+### talento-aci-stop
 
 - **Propósito**: detiene el Container Instance.
 - **Cuándo usar**: aislar container durante incidente de seguridad, mantenimiento
@@ -128,7 +148,7 @@ intent claro tipo "ejecuta de verdad" / "confirmo").
 - **Output**: estado antes/después.
 - **Impacto**: app TALENTO inaccesible hasta start. Azure deja de cobrar compute.
 
-### JT 42 — talento-aci-start
+### talento-aci-start
 
 - **Propósito**: inicia un container previamente detenido.
 - **Cuándo usar**: tras stop manual, tras incidente resuelto, parte de combo
@@ -137,7 +157,7 @@ intent claro tipo "ejecuta de verdad" / "confirmo").
 - **Output**: estado tras start (warm-up ~30s típico).
 - **Impacto**: container disponible. Idempotente si ya está Running.
 
-### JT 43 — talento-appservice-restart
+### talento-appservice-restart
 
 - **Propósito**: reinicia el App Service.
 - **Cuándo usar**: API no responde, cache corrupta, threadpool agotado, tras
@@ -150,11 +170,15 @@ intent claro tipo "ejecuta de verdad" / "confirmo").
 
 ## Protocolo del agente para usar los JTs
 
-1. **Pregunta de salud/estado** → preferir JT 39 (full-health-check) si es amplia,
-   o JTs específicos (36/37/38) si es focalizada.
+1. **Pregunta de salud/estado** → preferir `talento-full-health-check` si es
+   amplia, o JTs específicos (`talento-aci-state`, `talento-appservice-state`,
+   `talento-sql-health`) si es focalizada. **Para obtener el `template_id`
+   numérico, consultar la `description` del tool `run_awx_job_template` —
+   ahí están los IDs del entorno activo.**
 
-2. **Pregunta de logs/errores** → preferir JTs de análisis (32-35) sobre KQL
-   manual, porque los JTs ya implementan agregaciones probadas.
+2. **Pregunta de logs/errores** → preferir JTs de análisis (snapshot,
+   errors-analysis, sox-audit, brute-force-detector) sobre KQL manual,
+   porque ya implementan agregaciones probadas.
 
 3. **Pregunta de remediación** ("reinicia X", "para Y"):
    - PRIMERO diagnosticar el estado actual con el JT de estado correspondiente.

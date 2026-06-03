@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v12-codigo_error-no-usuario"  # v12: inspeccion empirica del workspace (30523 eventos JSON en 168h) confirma que (1) el campo de error se llama `codigo_error` en ESPANOL (no `error_code`), (2) NO existe campo de identidad de usuario en el JSON. Builders renombrados a p.codigo_error. Tools audit_user_activity y detect_brute_force REMOVIDAS hasta cerrar Hallazgo 2 (instrumentar Logback MDC). Nueva tool top_codigos_error para auditoria agregada sin identidad. scenarios sox-audit/brute-force/user-activity movidos a tier=pending con razon explicita. Knowledge actualizado con esquema real y patrones 11-14 marcados BLOQUEADOS
+CATALOG_VERSION = "v13-jt-ids-portables"  # v13: knowledge JTs reescrito SIN ids numericos hardcoded (slugs semanticos como talento-full-health-check). Los IDs reales viven solo en la tool description, generada dinamica desde JT_IDS del .env activo. Esto desacopla el knowledge del perfil (local 48-59 vs azure 32-43) y elimina la familia de errores "agente llama a JT 39 cuando AWX local tiene 55"
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
