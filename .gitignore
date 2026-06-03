@@ -1,7 +1,11 @@
 # Credenciales — JAMAS al repo
 .env
+.env.local
+.env.azure
 .env.*
 !.env.example
+!.env.local.example
+!.env.azure.example
 
 # Python
 __pycache__/
@@ -25,3 +29,12 @@ Thumbs.db
 
 # Ansible
 *.retry
+
+# Evaluation outputs — son resultados de ejecuciones, no código fuente.
+# Cada developer/CI los regenera con `python -m eval run`.
+function-app/evaluations/results/
+
+# Temp/cache adicionales
+.pytest_cache/
+.mypy_cache/
+*.log

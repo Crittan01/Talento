@@ -16,7 +16,8 @@ C_RESET  := \033[0m
 ENV_LOAD := if [ -f .env ]; then set -a; source .env; set +a; fi
 
 .PHONY: help install dev demo mock cli test awx-sync awx-status inject-demo \
-        stop clean rotate-secret-check repo-status pre-demo
+        stop clean rotate-secret-check repo-status pre-demo \
+        demo-local demo-azure profile-show profile-local profile-azure
 
 help:  ## Lista todos los targets disponibles
 	@echo ""
@@ -119,3 +120,46 @@ pre-demo: test awx-status  ## Checklist pre-demo: validate + awx-status
 	@printf "$(C_GREEN)   make demo       (real)$(C_RESET)\n"
 	@printf "$(C_GREEN)   make mock       (eventos pregrabados, sin tocar nada)$(C_RESET)\n"
 	@printf "$(C_GREEN)══════════════════════════════════════════════════════════════════$(C_RESET)\n"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Perfiles de entorno: alternar entre AWX local (192.168.250.20) y AWX Azure
+# (172.210.65.202) sin editar codigo. Cada perfil tiene su set de JT IDs +
+# AWX_URL + AWX_TOKEN. El target activa el perfil copiandolo a .env y luego
+# levanta la webapp con `make demo`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+profile-show:  ## Muestra el AWX_URL activo del .env actual
+	@if [ -f .env ]; then \
+		AWX=$$(grep -E "^AWX_URL=" .env | cut -d= -f2); \
+		if echo "$$AWX" | grep -q "172.210.65.202"; then \
+			printf "$(C_CYAN)Perfil activo:$(C_RESET) $(C_GREEN)AZURE$(C_RESET) ($$AWX)\n"; \
+		elif echo "$$AWX" | grep -q "192.168.250.20"; then \
+			printf "$(C_CYAN)Perfil activo:$(C_RESET) $(C_YELLOW)LOCAL$(C_RESET) ($$AWX)\n"; \
+		else \
+			printf "$(C_CYAN)Perfil activo:$(C_RESET) custom ($$AWX)\n"; \
+		fi; \
+	else \
+		printf "$(C_RED)No hay .env. Crea uno desde .env.local.example o .env.azure.example$(C_RESET)\n"; \
+	fi
+
+profile-local:  ## Activa perfil LOCAL: copia .env.local a .env (NO levanta la app)
+	@if [ ! -f .env.local ]; then \
+		printf "$(C_RED).env.local no existe. Crealo: cp .env.local.example .env.local && editar$(C_RESET)\n"; \
+		exit 1; \
+	fi
+	@cp .env.local .env
+	@chmod 600 .env
+	@printf "$(C_GREEN)✓ Perfil LOCAL activado$(C_RESET) (AWX 192.168.250.20)\n"
+
+profile-azure:  ## Activa perfil AZURE: copia .env.azure a .env (NO levanta la app)
+	@if [ ! -f .env.azure ]; then \
+		printf "$(C_RED).env.azure no existe. Crealo: cp .env.azure.example .env.azure && editar$(C_RESET)\n"; \
+		exit 1; \
+	fi
+	@cp .env.azure .env
+	@chmod 600 .env
+	@printf "$(C_GREEN)✓ Perfil AZURE activado$(C_RESET) (AWX 172.210.65.202)\n"
+
+demo-local: profile-local demo  ## Activa perfil LOCAL y levanta dashboard
+
+demo-azure: profile-azure demo  ## Activa perfil AZURE y levanta dashboard
