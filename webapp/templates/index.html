@@ -90,17 +90,19 @@
         {# PENDING — 3 cards disabled mientras EAPPS resuelve #}
         {% set pending_scenarios = scenarios | selectattr('tier', 'equalto', 'pending') | list %}
         {% if pending_scenarios %}
-        <div class="ecp-sidebar__subtitle">⏳ Esperando EAPPS</div>
+        <div class="ecp-sidebar__subtitle">⏳ Esperando datos de EAPPS ({{ pending_scenarios|length }} escenarios)</div>
         {% for s in pending_scenarios %}
         <article class="ecp-sidebar-card ecp-sidebar-card--pending"
                  data-scenario-id="{{ s.id }}"
                  data-tier="pending"
+                 data-pending-reason="{{ s.pending_eapps_reason }}"
                  title="Esperando EAPPS: {{ s.pending_eapps_reason }}">
           <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
           <div class="ecp-sidebar-card__body">
             <div class="ecp-sidebar-card__title">{{ s.title }}</div>
             <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
             <span class="ecp-sidebar-card__pending-badge">⏳ Esperando dato EAPPS</span>
+            <div class="ecp-sidebar-card__pending-reason">{{ s.pending_eapps_reason | truncate(160) }}</div>
           </div>
         </article>
         {% endfor %}

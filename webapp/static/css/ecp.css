@@ -1387,6 +1387,16 @@ body {
   border-radius: 8px;
   font-weight: 600;
 }
+.ecp-sidebar-card__pending-reason {
+  font-size: 11px;
+  color: #8a6d3b;
+  background: #fff8e1;
+  border-left: 3px solid #f0ad4e;
+  padding: 6px 8px;
+  margin-top: 6px;
+  border-radius: 3px;
+  line-height: 1.4;
+}
 
 /* ----- Tier SECONDARY ----- */
 .ecp-sidebar-card--secondary {

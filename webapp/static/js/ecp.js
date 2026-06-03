@@ -144,10 +144,23 @@
     // Cards de info NO disparan run (las maneja sidebar.addEventListener via data-info-view)
     if (card.dataset.infoView) return;
 
-    // Pending de EAPPS: mostrar tooltip explicativo en lugar de ejecutar
+    // Pending de EAPPS: render explicativo en el panel principal, sin alert nativo.
     if (card.dataset.tier === 'pending') {
-      const reason = card.title || 'Esperando EAPPS';
-      alert(`Este escenario esta esperando que EAPPS habilite el dato necesario.\n\n${reason}`);
+      const reason = card.dataset.pendingReason || card.title || 'Esperando EAPPS';
+      const title = card.querySelector('.ecp-sidebar-card__title')?.textContent || 'Escenario pendiente';
+      if (el && el.timeline) {
+        el.timeline.innerHTML = `
+          <div class="info-finding info-finding--pending" style="margin:12px;padding:16px;border-left:4px solid #f0ad4e;background:#fff8e1;border-radius:4px;">
+            <h3 style="margin-top:0;color:#8a6d3b;">⏳ ${title} — esperando EAPPS</h3>
+            <p style="line-height:1.5;color:#5c4b1f;">${reason}</p>
+            <p style="font-size:12px;color:#8a6d3b;margin-bottom:0;">
+              Cuando EAPPS habilite el dato faltante, este escenario se reactiva sin tocar codigo.
+              Ver tarjeta <b>Hallazgos EAPPS</b> en el panel de informacion para detalle y comando az.
+            </p>
+          </div>`;
+        if (el.resultWrap) el.resultWrap.style.display = 'none';
+        if (el.infoView) el.infoView.style.display = 'none';
+      }
       return;
     }
 
