@@ -1,15 +1,15 @@
-"""info_views — proveedores de datos para las 5 vistas de informacion del dashboard.
+"""info_views — proveedores de datos para las vistas de informacion del dashboard.
 
 Cada funcion devuelve un dict serializable a JSON con la info estructurada
-de su vista. Sin red, sin estado mutable, sin side effects — solo lee
-archivos del repo y hardcodea datos validados empiricamente.
+de su vista. Sin red, sin estado mutable, sin side effects — lee archivos
+del repo y consume vars del .env activo via bridge_l2.ENV.
 
 Vistas:
   1. cert_summary()       — Certificacion SOX 50/50 + portal Foundry
-  2. agent_info()         — v7-gpt4o-guard: modelo, tools, reglas, JT IDs
+  2. agent_info()         — Version actual: modelo, tools, reglas, JT IDs
   3. knowledge_index()    — Lista de archivos de knowledge base
   4. knowledge_file()     — Contenido de un archivo .md
-  5. eapps_findings()     — Los 2 hallazgos abiertos con datos empiricos
+  5. eapps_findings()     — Hallazgos abiertos con datos empiricos
   6. runs_history()       — Historico de evaluation runs
 """
 from __future__ import annotations
@@ -24,6 +24,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FUNCTION_APP_DIR = PROJECT_ROOT / "function-app"
 KNOWLEDGE_DIR = FUNCTION_APP_DIR / "knowledge"
 EVAL_RESULTS_DIR = FUNCTION_APP_DIR / "evaluations" / "results"
+
+# Vars del .env activo — el dashboard lee de aqui en vez de hardcodear nombres.
+sys.path.insert(0, str(FUNCTION_APP_DIR))
+import bridge_l2  # noqa: E402
+
+ACI_NAME = bridge_l2.ENV.get("ACI_NAME", "<sin-configurar>")
+ACI_RG = bridge_l2.ENV.get("ACI_RESOURCE_GROUP", "<sin-configurar>")
+APPSERVICE_NAME = bridge_l2.ENV.get("APPSERVICE_NAME", "<sin-configurar>")
+APPSERVICE_RG = bridge_l2.ENV.get("APPSERVICE_RESOURCE_GROUP", "<sin-configurar>")
+SQL_NAME = bridge_l2.ENV.get("SQL_SERVER_NAME", "<sin-configurar>")
+SQL_RG = bridge_l2.ENV.get("SQL_RESOURCE_GROUP", "<sin-configurar>")
+WORKSPACE_ID = bridge_l2.ENV.get("LOG_ANALYTICS_WORKSPACE_ID", "<sin-configurar>")
 
 
 # ============================================================================
@@ -257,59 +269,115 @@ def knowledge_file(file_id: str) -> Optional[dict]:
 # Vista 5: Hallazgos EAPPS
 # ============================================================================
 def eapps_findings() -> dict:
-    """Hallazgos con EAPPS — estado actualizado segun validaciones empiricas."""
+    """Hallazgos con EAPPS — estado actualizado tras validacion empirica del workspace."""
     return {
-        "status": "1 hallazgo RESUELTO (codigo) + diagnostic settings pendiente — 1 hallazgo ABIERTO",
+        "status": "2 hallazgos ABIERTOS bloquean la demo SOX por usuario",
         "findings": [
             {
                 "id": "1",
-                "title": "Logs JSON estructurados — RESUELTO (codigo en ACI 2)",
-                "severity": "resuelto",
-                "summary": (
-                    "EAPPS desplego en el ACI 'aci-centralecopetrol2' (rg-central-"
-                    "solucion-talento2) el codigo con los campos JSON dedicados "
-                    "`usuario` y `error_code`. Validado empiricamente via `az "
-                    "container logs`: aparece el sample del Login fallido con "
-                    "`usuario:'nvivas'` y `error_code:'TLNT-008'` correctamente "
-                    "estructurados. La knowledge del agente fue actualizada "
-                    "(patrones KQL 11-14) y los escenarios SOX Audit por Usuario + "
-                    "Brute Force fueron activados."
+                "title": (
+                    f"Pipeline de logs del ACI moderno `{ACI_NAME}` desconectado"
                 ),
-                "schema_real": [
-                    "@timestamp", "@version", "message", "logger_name",
-                    "thread_name", "level", "level_value",
-                    "correlation_id", "usuario", "error_code", "modulo",
-                ],
-                "coverage_24h": [
-                    {"field": "@timestamp", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "level (INFO/WARN/ERROR)", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "message", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "logger_name", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "thread_name", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "correlation_id", "covered": 30338, "total": 30488, "ok": True},
-                    {"field": "modulo", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "usuario (nuevo)", "covered": 4, "total": 59, "ok": True,
-                     "note": "Sample del ACI 2 (stdout via az container logs). En logs reales del login: 100%"},
-                    {"field": "error_code (nuevo)", "covered": 1, "total": 59, "ok": True,
-                     "note": "Sample del ACI 2: TLNT-008 en login fallido. Logs poblan el campo cuando hay error catalogado"},
+                "severity": "alta",
+                "summary": (
+                    f"El target operativo (via .env) es el ACI moderno `{ACI_NAME}` en "
+                    f"el RG `{ACI_RG}`. Inspeccion empirica del workspace de Log "
+                    f"Analytics confirma que ese ACI NO emite logs: "
+                    f"(a) sin diagnostic settings (Azure Monitor), "
+                    f"(b) sin propiedad legacy `diagnostics.logAnalytics` en el "
+                    f"containerGroup. En las ultimas 24h, los 13,659 registros de "
+                    f"`ContainerInstanceLog_CL` provienen integramente del ACI 1 viejo "
+                    f"(`aci-centralecopetrol` en `rg-central-solucion-talento`) via "
+                    f"propiedad legacy ya configurada. AWX operara sobre el ACI moderno "
+                    f"pero las KQL del agente solo veran al viejo hasta que se conecte "
+                    f"el pipeline."
+                ),
+                "evidence": [
+                    f"ACI moderno (target): {ACI_NAME} en {ACI_RG} -> sin logs.",
+                    f"ACI viejo (origen actual de logs): aci-centralecopetrol en rg-central-solucion-talento -> 13,659 registros/24h.",
+                    f"Workspace destino: law-central-soluciontalento (customerId {WORKSPACE_ID}).",
+                    "Diagnostic settings ACI moderno: list vacia.",
+                    "Container.diagnostics.logAnalytics ACI moderno: no configurado (propiedad inmutable).",
                 ],
                 "pending_action": (
-                    "Configurar diagnostic settings del ACI 'aci-centralecopetrol2' "
-                    "(rg-central-solucion-talento2) hacia el workspace de Log Analytics "
-                    "`tlnt-loganalytics` (id 9e0a97a6-6839-4507-aae4-e4d706d1c320) — "
-                    "actualmente los logs del ACI 2 no llegan a ese workspace. El dashboard "
-                    "y el agente ya estan cableados para consumir los campos en el momento "
-                    "que comiencen a fluir; no requiere mas cambios en este lado."
+                    f"Recrear `{ACI_NAME}` con bloque `diagnostics.logAnalytics` "
+                    f"apuntando al workspace `law-central-soluciontalento` (customerId "
+                    f"{WORKSPACE_ID}). Es una propiedad INMUTABLE — no se puede "
+                    f"agregar post-creacion. Comando az exacto al final de este hallazgo."
                 ),
-                "request_to_eapps": (
-                    "Conectar diagnostic settings del ACI 2 al workspace `9e0a97a6...` "
-                    "para que los logs JSON con campos dedicados lleguen al sistema "
-                    "de monitoreo. Alternativamente, migrar el trafico productivo "
-                    "del ACI 1 (con codigo viejo) al ACI 2 (con codigo nuevo)."
+                "command_for_eapps": (
+                    "WS_KEY=$(az monitor log-analytics workspace get-shared-keys "
+                    "-g rg-central-solucion-talento -n law-central-soluciontalento "
+                    "--query primarySharedKey -o tsv) && \\\n"
+                    f"# luego: redesplegar {ACI_NAME} (template ARM o az container create) "
+                    f"con diagnostics.logAnalytics.workspaceId={WORKSPACE_ID} "
+                    "y workspaceKey=$WS_KEY"
                 ),
             },
             {
                 "id": "2",
+                "title": "Campo de identidad de usuario ausente en JSON de logs",
+                "severity": "media",
+                "summary": (
+                    "EAPPS habia confirmado que el JSON estructurado expone los "
+                    "campos `usuario` y `error_code`. Inspeccion empirica del "
+                    "workspace en 168h (30,523 eventos JSON) muestra: "
+                    "(a) el codigo TLNT vive en `codigo_error` (campo en ESPANOL, "
+                    "22.7% cobertura), no `error_code`; (b) NO existe ningun "
+                    "campo de identidad (`usuario`, `user`, `userName`, "
+                    "`principalName`, `userId`). El correlador disponible es "
+                    "`correlation_id` (99.5%). Cualquier query SOX por usuario "
+                    "devuelve 0 filas hoy."
+                ),
+                "evidence": [
+                    "Keys top-level del JSON en 168h: @timestamp, @version, level, level_value, message, modulo, logger_name, thread_name (100%), correlation_id (99.5%), codigo_error (22.7%), tags (3.7%).",
+                    "0 ocurrencias de cualquier campo de identidad de usuario.",
+                    "Knowledge actualizado a `tostring(p.codigo_error)` y escenarios sox-audit/brute-force/user-activity movidos a tier=pending.",
+                ],
+                "request_to_eapps": (
+                    "Instrumentar Logback MDC con el principal autenticado para que "
+                    "aparezca como key top-level del JSON estructurado. Hasta entonces, "
+                    "la auditoria SOX por usuario es inviable y se debe cruzar "
+                    "manualmente `correlation_id` contra Azure AD signin logs."
+                ),
+            },
+            {
+                "id": "3",
+                "title": f"Service Principal sin permisos sobre `{ACI_RG}`",
+                "severity": "alta",
+                "summary": (
+                    f"El bridge ya inyecta el target modular hacia `{ACI_NAME}` en "
+                    f"`{ACI_RG}` como extra_vars, los playbooks usan `mandatory` "
+                    f"filter (no defaults hardcoded) y AWX recibe la solicitud "
+                    f"correctamente. Pero el Service Principal de Azure que ejecuta "
+                    "los Job Templates (bbd498f7-caed-4daa-a236-f12fd3a13461) solo "
+                    "tiene roles asignados sobre `rg-central-solucion-talento` (RG "
+                    "del ACI viejo) — no sobre el RG del ACI moderno. Smoke "
+                    "Health Check Completo (JT 55) falla con HTTP 403 de Azure ARM."
+                ),
+                "evidence": [
+                    "Smoke v14: scenario=infra-health-check -> JT 55 ejecutado -> AWX status=failed.",
+                    f"Error reportado: 'cliente {bridge_l2.ENV.get('AZURE_CLIENT_ID','?')[:12]}... no tiene permisos para realizar la accion requerida sobre los recursos de Container Instances'.",
+                    f"Esto PRUEBA que la modularizacion funciona — el playbook intento operar sobre {ACI_RG} (no sobre el RG viejo).",
+                ],
+                "pending_action": (
+                    f"Asignar al SP los 11 roles necesarios sobre `{ACI_RG}` "
+                    "(equivalente al setup que existe en `rg-central-solucion-talento`)."
+                ),
+                "command_for_admin_azure": (
+                    "# Asignar Contributor al SP sobre el RG moderno (forma mas amplia)\n"
+                    f"az role assignment create --assignee {bridge_l2.ENV.get('AZURE_CLIENT_ID','<sp-id>')} "
+                    f"--role Contributor --scope $(az group show -n {ACI_RG} --query id -o tsv)\n"
+                    "# Alternativa minima (roles especificos):\n"
+                    "# - Microsoft.ContainerInstance/containerGroups/read\n"
+                    "# - Microsoft.ContainerInstance/containerGroups/restart/action\n"
+                    "# - Microsoft.ContainerInstance/containerGroups/stop/action\n"
+                    "# - Microsoft.ContainerInstance/containerGroups/start/action\n"
+                    "# (usar el JT talento-aci-permissions-test para validar)"
+                ),
+            },
+            {
+                "id": "4",
                 "title": "Application Insights sin telemetria",
                 "severity": "alta",
                 "summary": (

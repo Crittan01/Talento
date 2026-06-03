@@ -23,8 +23,8 @@
 #   6. Teams card "RESTART aplicado a X — estado nuevo"
 #
 # Vars principales:
-#   container_group_name  default 'aci-centralecopetrol'
-#   resource_group        default 'rg-central-solucion-talento'
+#   container_group_name  passed by bridge from .env ACI_NAME
+#   resource_group        passed by bridge from .env ACI_RESOURCE_GROUP
 #   is_dry_run               default true  ← SAFETY
 
 - name: TALENTO ACI restart — REMEDIACION (is_dry_run por defecto)
@@ -36,8 +36,8 @@
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
     client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
     subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
-    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
-    container_group_name: "{{ container_name | default('aci-centralecopetrol') }}"
+    resource_group: "{{ azure_resource_group | mandatory }}"
+    container_group_name: "{{ container_name | mandatory }}"
     is_dry_run: "{{ dry_run | default(true) | bool }}"
     teams_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
     action_reason: "{{ reason | default('Auto-remediacion solicitada por agente IA') }}"

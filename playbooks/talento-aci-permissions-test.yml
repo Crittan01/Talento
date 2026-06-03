@@ -2,7 +2,7 @@
 # talento-aci-permissions-test.yml
 #
 # Auditoria de permisos Azure RBAC del Service Principal sobre el RG
-# rg-central-solucion-talento. NO ejecuta acciones destructivas — solo
+# RG indicado por azure_resource_group (mandatory). NO ejecuta acciones destructivas — solo
 # lectura + enumeracion via Microsoft.Authorization/permissions.
 #
 # Doble proposito:
@@ -34,7 +34,7 @@
   gather_facts: false
 
   vars:
-    resource_group: "rg-central-solucion-talento"
+    resource_group: "{{ azure_resource_group | mandatory }}"
     tenant_id: "{{ azure_tenant_id | default(lookup('env', 'AZURE_TENANT_ID')) }}"
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
     client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"

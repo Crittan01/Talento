@@ -22,7 +22,7 @@
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
     client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
     subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
-    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    resource_group: "{{ azure_resource_group | mandatory }}"
 
   tasks:
     - name: Validar vars Azure

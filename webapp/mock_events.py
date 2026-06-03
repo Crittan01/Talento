@@ -90,13 +90,13 @@ _ERRORS = [
                    ["No se pudo enviar la notificacion por correo: Authentication failed", 10],
                    ["Login failed for user 'sqlserver-ecopetrol-admin'", 6],
                ],
-               "affected_containers": [["aci-centralecopetrol", 191]],
+               "affected_containers": [["aci-centralecopetrol2", 191]],
            }}),
     (2.0, {"type": "agent.final", "elapsed_seconds": 18.7,
            "text": (
                "### Hallazgo\n"
                "Severidad **CRITICAL**: 114 errores + 77 warnings en las ultimas 24h.\n"
-               "Concentrados en el container aci-centralecopetrol (191 eventos criticos).\n\n"
+               "Concentrados en el container aci-centralecopetrol2 (191 eventos criticos).\n\n"
                "### Hipotesis\n"
                "1. Stack traces de Hibernate apuntan a problemas de conectividad con SQL Server.\n"
                "2. Fallos repetidos de envio de email por authentication failed (10x).\n"
@@ -232,7 +232,7 @@ _PAYROLL_SLOW = [
                    ["Connection pool exhausted, waiting for a free connection", 12],
                    ["Slow query detected, execution_time=4300ms", 5],
                ],
-               "affected_containers": [["aci-centralecopetrol", 65]],
+               "affected_containers": [["aci-centralecopetrol2", 65]],
            }}),
     (2.0, {"type": "agent.final", "elapsed_seconds": 14.2,
            "text": (

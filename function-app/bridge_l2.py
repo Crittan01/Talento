@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v13-jt-ids-portables"  # v13: knowledge JTs reescrito SIN ids numericos hardcoded (slugs semanticos como talento-full-health-check). Los IDs reales viven solo en la tool description, generada dinamica desde JT_IDS del .env activo. Esto desacopla el knowledge del perfil (local 48-59 vs azure 32-43) y elimina la familia de errores "agente llama a JT 39 cuando AWX local tiene 55"
+CATALOG_VERSION = "v14-aci-modular"  # v14: nombre del ACI, RG, App Service, SQL Server NO viven hardcoded en playbooks ni en knowledge. .env activo declara ACI_NAME, ACI_RESOURCE_GROUP, APPSERVICE_NAME, APPSERVICE_RESOURCE_GROUP, SQL_SERVER_NAME, SQL_RESOURCE_GROUP. Bridge inyecta esas vars como extra_vars en cada call AWX. Playbooks usan `mandatory` filter Jinja en lugar de `default(...)` -> falla rapido si faltan. Webapp info_views consume del .env via bridge_l2.ENV. mock_events alineado a aci-centralecopetrol2. Decision: target oficial = ACI moderno (aci-centralecopetrol2 en rg-central-solucion-talento2). Hallazgo 1 abierto: pipeline de logs del ACI 2 desconectado (recrear container group con diagnostics.logAnalytics, comando az en eapps_findings)
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -438,6 +438,22 @@ def run_awx_job_template(
         # subscription_id necesario para los JTs ARM (aci-*, appservice-*, sql-*)
         extra_vars.setdefault("azure_subscription_id", ENV.get("AZURE_SUBSCRIPTION_ID", ""))
         extra_vars.setdefault("log_analytics_workspace_id", ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""))
+        # Targets de recursos Azure (ACI, App Service, SQL). El bridge los
+        # inyecta SIEMPRE desde .env — los playbooks ya no llevan defaults
+        # hardcoded. Cambiar de target (ej. ACI viejo vs moderno) se hace
+        # editando el .env, sin tocar playbooks ni codigo.
+        if ENV.get("ACI_NAME"):
+            extra_vars.setdefault("container_name", ENV["ACI_NAME"])
+        if ENV.get("ACI_RESOURCE_GROUP"):
+            extra_vars.setdefault("azure_resource_group", ENV["ACI_RESOURCE_GROUP"])
+        if ENV.get("APPSERVICE_NAME"):
+            extra_vars.setdefault("appservice_name", ENV["APPSERVICE_NAME"])
+        if ENV.get("APPSERVICE_RESOURCE_GROUP"):
+            extra_vars.setdefault("appservice_resource_group", ENV["APPSERVICE_RESOURCE_GROUP"])
+        if ENV.get("SQL_SERVER_NAME"):
+            extra_vars.setdefault("sql_server_name", ENV["SQL_SERVER_NAME"])
+        if ENV.get("SQL_RESOURCE_GROUP"):
+            extra_vars.setdefault("sql_resource_group", ENV["SQL_RESOURCE_GROUP"])
         # Default time_range si NI el LLM NI force_extra_vars lo trajeron
         extra_vars.setdefault("time_range_hours", 24)
         # Teams webhook para adaptive card al final del playbook (opcional)
@@ -1103,11 +1119,23 @@ def process_response_items(
                     ev = json.loads(ev_raw) if ev_raw and ev_raw.strip() else {}
                 except json.JSONDecodeError:
                     ev = {}
-                # Si hay filtros forzados del usuario, anunciarlo en el log
-                # para que sea visible en el timeline
+                # Simular las inyecciones del bridge (ACI_NAME, RG, creds, etc)
+                # para que la UI muestre EXACTAMENTE lo que viajara a AWX.
                 effective_ev = dict(ev)
                 if force_extra_vars:
                     effective_ev.update(force_extra_vars)
+                if tpl in TEMPLATES_NEEDING_AZURE_CREDS:
+                    for env_key, ev_key in (
+                        ("ACI_NAME", "container_name"),
+                        ("ACI_RESOURCE_GROUP", "azure_resource_group"),
+                        ("APPSERVICE_NAME", "appservice_name"),
+                        ("APPSERVICE_RESOURCE_GROUP", "appservice_resource_group"),
+                        ("SQL_SERVER_NAME", "sql_server_name"),
+                        ("SQL_RESOURCE_GROUP", "sql_resource_group"),
+                    ):
+                        if ENV.get(env_key) and ev_key not in effective_ev:
+                            effective_ev[ev_key] = ENV[env_key]
+                    effective_ev.setdefault("time_range_hours", 24)
                 print(f"     AWX template_id={tpl}  extra_vars(efectivo)={effective_ev}")
                 _emit(emit, {
                     "type": "tool.call",

@@ -2,7 +2,7 @@
 # talento-aci-state.yml
 #
 # DIAGNOSTICO (no invasivo) — reporta el estado actual de los Azure
-# Container Instances del RG rg-central-solucion-talento.
+# Container Instances del RG indicado por azure_resource_group (mandatory).
 #
 # Para cada container group muestra:
 #   - state (Running/Terminated/Pending/...), provisioningState
@@ -14,7 +14,7 @@
 #
 # Vars (extra_vars con fallback al entorno):
 #   azure_tenant_id / azure_client_id / azure_client_secret / azure_subscription_id
-#   resource_group (default: rg-central-solucion-talento)
+#   resource_group (passed by bridge from .env ACI_RESOURCE_GROUP)
 #
 # Set_stats:
 #   aci_count, aci_summary (lista de dicts), aci_severity (HEALTHY/DEGRADED/CRITICAL)
@@ -28,7 +28,7 @@
     client_id: "{{ azure_client_id | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
     client_secret: "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
     subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
-    resource_group: "{{ azure_resource_group | default('rg-central-solucion-talento') }}"
+    resource_group: "{{ azure_resource_group | mandatory }}"
     teams_webhook_url: "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
 
   tasks:
