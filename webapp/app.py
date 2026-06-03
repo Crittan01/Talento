@@ -209,7 +209,7 @@ async def api_run(payload: RunRequest):
     run_id = await bridge_runner.start_run(
         user_question=prompt,
         no_setup=True,
-        max_hops=4,
+        max_hops=8,
         force_extra_vars=payload.filters or None,
     )
     return {"run_id": run_id, "mode": "real"}

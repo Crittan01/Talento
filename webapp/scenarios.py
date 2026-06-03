@@ -117,16 +117,13 @@ SCENARIOS = {
         "subtitle": "ERROR/WARN agrupados por error_code dedicado",
         "prompt": (
             "Detecta errores y warnings criticos en TALENTO de las ultimas "
-            "{time_range_hours} horas. Antes de la query usa file_search con "
-            "'detectar codigos TLNT patron 4' para obtener la query KQL que usa "
-            "`coalesce(tostring(p.error_code), extract regex)` (asi cuenta tanto "
-            "logs con campo dedicado como historicos). Tambien puedes ejecutar "
-            "JT id={jt_errors_analysis} (talento-errors-analysis) con extra_vars_json="
-            "'{{\"time_range_hours\": {time_range_hours}}}' como complemento. "
-            "Para cada codigo TLNT-XXX detectado cita textualmente del catalogo "
-            "via file_search. Sintetiza cuantos errores, cuantos warnings, top "
-            "mensajes, codigos TLNT, controllers afectados (logger_name). Reporta "
-            "en espanol."
+            "{time_range_hours} horas. Ejecuta directamente el job template "
+            "id={jt_errors_analysis} (talento-errors-analysis) con extra_vars_json="
+            "'{{\"time_range_hours\": {time_range_hours}}}'. Cuando termine, "
+            "sintetiza cuantos errores, cuantos warnings, top mensajes, codigos "
+            "TLNT-XXX detectados. Para cada codigo TLNT cita su definicion "
+            "consultando el catalogo TLNT via file_search. Indica los controllers "
+            "afectados (logger_name). Reporta en espanol estructurado."
         ),
         "expected_jt": JT_IDS["jt_errors_analysis"],
         "renderer": "errors",
@@ -141,15 +138,22 @@ SCENARIOS = {
         "icon": "🔍",
         "subtitle": "Reconstruir el viaje de una peticion especifica",
         "prompt": (
-            "Reconstruye el viaje del correlation_id '{user_input}' en TALENTO. "
-            "Primero consulta file_search con 'patrones KQL TALENTO' para obtener "
-            "el patron 3 (trazabilidad por correlation_id). Luego ejecuta "
-            "query_log_analytics con esa query filtrando por correlation_id="
-            "'{user_input}' en las ultimas {time_range_hours} horas. Cuando "
-            "termine, sintetiza la secuencia cronologica: timestamp de entrada, "
-            "logger_name, level, mensaje. Si detectas codigos TLNT-XXX en algun "
-            "log, busca su definicion en file_search y citala. Reporta en espanol "
-            "estructurado (Hallazgo, Hipotesis, Pasos, Accion)."
+            "Reconstruye el viaje del correlation_id '{user_input}' en TALENTO "
+            "sobre las ultimas {time_range_hours} horas.\n\n"
+            "PASO 1: Consulta file_search con 'patron KQL trazabilidad "
+            "correlation_id' para LEER el patron 3 documentado en la guia KQL. "
+            "Extrae de ahi la query KQL.\n\n"
+            "PASO 2: Ejecuta query_log_analytics pasando una QUERY KQL VALIDA "
+            "que filtre por `tostring(p.correlation_id) == '{user_input}'` "
+            "(despues de parse_json del campo Message) en ventana "
+            "ago({time_range_hours}h), ordenada por TimeGenerated asc.\n\n"
+            "PASO 3: Si en los resultados aparecen codigos TLNT-XXX en "
+            "p.error_code o en el mensaje, consulta file_search con el codigo "
+            "para citar su definicion del catalogo.\n\n"
+            "Sintetiza la secuencia cronologica: entrada de la peticion, pasos "
+            "ejecutados, donde fallo si hay ERROR/WARN, codigo TLNT con su "
+            "explicacion. Reporta en espanol estructurado (Hallazgo, Hipotesis, "
+            "Pasos, Accion)."
         ),
         "expected_jt": None,  # usa query_log_analytics, no AWX
         "renderer": "generic",
@@ -166,12 +170,17 @@ SCENARIOS = {
         "icon": "📚",
         "subtitle": "Significado oficial desde el catalogo",
         "prompt": (
-            "El usuario pregunta sobre el codigo: '{user_input}'. Usa file_search "
-            "con la pregunta exacta para buscar en el catalogo de codigos TLNT-XXX. "
-            "Cita textualmente la descripcion, modulo origen, accion sugerida para "
-            "soporte y solucion para usuario final. Si el codigo no esta en el "
-            "catalogo, indicalo claramente y sugiere validar con EAPPS. NO inventes "
-            "significados. Reporta en espanol estructurado."
+            "El operador pregunta: '{user_input}'.\n\n"
+            "PASO 1: Consulta file_search con la pregunta exacta del operador "
+            "para buscar en el catalogo de codigos TLNT-XXX (knowledge base).\n\n"
+            "PASO 2: De la respuesta de file_search extrae para cada codigo "
+            "encontrado: descripcion oficial, modulo origen, accion sugerida "
+            "para soporte, solucion para usuario final. Cita textualmente del "
+            "catalogo, no parafrases.\n\n"
+            "Si el codigo no esta en el catalogo, indicalo claramente y sugiere "
+            "validar con EAPPS. NO inventes significados de codigos. NO uses "
+            "query_log_analytics para esto — file_search del catalogo es "
+            "suficiente. Reporta en espanol estructurado."
         ),
         "expected_jt": None,  # solo file_search
         "renderer": "generic",
@@ -211,16 +220,22 @@ SCENARIOS = {
         "icon": "🔐",
         "subtitle": "Logins privilegiados + acciones criticas por usuario",
         "prompt": (
-            "TALENTO es regulado por SOX. Antes de formular cualquier query usa "
-            "file_search con 'auditoria SOX por usuario patron KQL' para obtener "
-            "el patron 13 de la guia KQL. Luego ejecuta query_log_analytics "
-            "agrupando logs de las ultimas {time_range_hours} horas por el campo "
-            "`usuario` (campo dedicado en el JSON estructurado) y clasificando "
-            "tipo_accion (login_ok, login_fail, listing, aprobacion, modificacion). "
-            "Si detectas codigos TLNT-XXX en error_code, cita su definicion via "
-            "file_search en el catalogo. Sintetiza usuarios con mas actividad, "
-            "acciones privilegiadas detectadas, anomalias. Reporta en espanol con "
-            "enfasis en compliance."
+            "TALENTO es regulado por SOX. El operador pide auditar la actividad "
+            "por usuario de las ultimas {time_range_hours} horas. \n\n"
+            "PASO 1: Consulta file_search con la pregunta 'patron KQL auditoria "
+            "SOX por usuario' para LEER el patron 13 documentado en la guia KQL. "
+            "(file_search devuelve markdown del knowledge base — extrae de ahi la "
+            "query KQL).\n\n"
+            "PASO 2: Toma la query KQL del patron 13, ajusta el time range a "
+            "ago({time_range_hours}h), y ejecuta query_log_analytics pasando la "
+            "QUERY KQL como argumento (NO pases texto de busqueda — el tool "
+            "espera KQL valido contra ContainerInstanceLog_CL con parse_json "
+            "del campo Message).\n\n"
+            "PASO 3: Si aparecen codigos TLNT-XXX en los resultados, consulta "
+            "file_search con el codigo (ej 'TLNT-008') para citar su definicion "
+            "del catalogo.\n\n"
+            "Sintetiza usuarios con mas actividad, acciones privilegiadas, "
+            "anomalias. Reporta en espanol con enfasis en compliance."
         ),
         "expected_jt": None,
         "renderer": "sox",
@@ -235,17 +250,21 @@ SCENARIOS = {
         "icon": "🛡️",
         "subtitle": "Intentos fallidos por usuario (TLNT-002/008/011)",
         "prompt": (
-            "Detecta brute force en TALENTO. Antes de formular la query usa "
-            "file_search con 'brute force por usuario patron KQL' para obtener el "
-            "patron 12 de la guia KQL. Luego ejecuta query_log_analytics filtrando "
-            "logs de las ultimas {time_range_hours} horas con `error_code in "
-            "('TLNT-002','TLNT-008','TLNT-011')` (fallos de autenticacion segun "
-            "catalogo). Agrupa por campo `usuario` (dedicado en JSON), con umbral "
-            "de {failed_threshold}+ fallos. Para cada usuario sospechoso cita "
-            "definicion de los codigos TLNT via file_search. Sintetiza usuarios "
-            "afectados, severidad (HIGH si fails >= 10, MEDIUM si >= 5, LOW si <5), "
-            "primer/ultimo intento, recomendacion de accion (bloqueo, notificacion "
-            "a SOC). Reporta en espanol."
+            "Detecta brute force en TALENTO sobre las ultimas {time_range_hours} "
+            "horas, con umbral de {failed_threshold} fallos por usuario.\n\n"
+            "PASO 1: Consulta file_search con 'patron KQL brute force por usuario' "
+            "para LEER el patron 12 (markdown). Extrae de ahi la query KQL.\n\n"
+            "PASO 2: Toma esa query, ajusta time range a ago({time_range_hours}h) "
+            "y umbral a fails >= {failed_threshold}. Ejecuta query_log_analytics "
+            "pasando la QUERY KQL como argumento. La query debe filtrar por "
+            "`tostring(p.error_code) in ('TLNT-002','TLNT-008','TLNT-011')` "
+            "(despues de parse_json del campo Message) y agrupar por "
+            "tostring(p.usuario).\n\n"
+            "PASO 3: Para cada usuario sospechoso, cita la definicion de los "
+            "codigos TLNT involucrados consultando file_search.\n\n"
+            "Sintetiza usuarios afectados, severidad (HIGH si fails >= 10, "
+            "MEDIUM si >= 5, LOW si < 5), primer/ultimo intento, recomendacion "
+            "(bloqueo, notificacion a SOC). Reporta en espanol."
         ),
         "expected_jt": None,
         "renderer": "brute-force",
@@ -261,16 +280,21 @@ SCENARIOS = {
         "subtitle": "Logins, acciones y errores de un usuario especifico",
         "prompt": (
             "El operador investiga la actividad del usuario '{user_input}' en "
-            "TALENTO. Antes de formular la query usa file_search con 'actividad "
-            "por usuario patron KQL' para obtener el patron 11 de la guia KQL. "
-            "Luego ejecuta query_log_analytics filtrando por `tostring(p.usuario) "
-            "== '{user_input}'` en las ultimas {time_range_hours} horas. Devuelve "
-            "los logs en orden cronologico desc, con timestamp, level, error_code, "
-            "msg, correlation_id, logger. Si hay codigos TLNT-XXX cita catalogo "
-            "via file_search. Sintetiza patron de actividad (cuantos logins, "
-            "errores tipicos, modulos visitados), si hay senales de brute force "
-            "(varios TLNT-002/008/011) o de cuenta comprometida. Reporta en "
-            "espanol estructurado (Hallazgo, Hipotesis, Pasos, Accion)."
+            "TALENTO sobre las ultimas {time_range_hours} horas.\n\n"
+            "PASO 1: Consulta file_search con 'patron KQL actividad por usuario' "
+            "para LEER el patron 11. Extrae la query KQL del markdown.\n\n"
+            "PASO 2: Ejecuta query_log_analytics pasando una query KQL VALIDA "
+            "que filtre por `tostring(p.usuario) == '{user_input}'` despues de "
+            "parse_json del campo Message, en ventana ago({time_range_hours}h). "
+            "Devuelve los logs ordenados por TimeGenerated desc con: timestamp, "
+            "level, error_code (de p.error_code), msg (de p.message), "
+            "correlation_id, logger_name. Maximo 50 filas.\n\n"
+            "PASO 3: Si aparecen codigos TLNT-XXX, consulta file_search con cada "
+            "codigo para citar su definicion del catalogo.\n\n"
+            "Sintetiza patron de actividad (cantidad de logins ok vs fail, "
+            "errores tipicos, modulos visitados), señales de brute force "
+            "(varios TLNT-002/008/011) o cuenta comprometida. Reporta en espanol "
+            "estructurado (Hallazgo, Hipotesis, Pasos, Accion)."
         ),
         "expected_jt": None,
         "renderer": "generic",
