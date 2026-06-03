@@ -308,6 +308,30 @@ _TLNT_LOOKUP = [
     (0.2, {"type": "done"}),
 ]
 
+# Mock para user-activity (free-text con username)
+_USER_ACTIVITY = [
+    (0.0, {"type": "agent.received", "question": "Investigar actividad usuario"}),
+    (0.2, {"type": "agent.hop", "hop": 1}),
+    (0.3, {"type": "tool.call", "hop": 1, "tool": "file_search",
+           "args": {"query": "actividad por usuario patron 11 KQL"}}),
+    (0.5, {"type": "tool.call", "hop": 1, "tool": "query_log_analytics",
+           "args": {"query": "ContainerInstanceLog_CL | where ... p.usuario == 'nvivas'"}}),
+    (1.0, {"type": "tool.kql.done", "hop": 1, "rows": 23, "elapsed_seconds": 1.0}),
+    (1.2, {"type": "agent.final",
+           "text": ("### Hallazgo\n"
+                    "Actividad del usuario 'nvivas' en 24h: 23 eventos.\n"
+                    "- 2 logins exitosos\n"
+                    "- 5 logins fallidos (4× TLNT-008 password incorrecta, "
+                    "1× TLNT-011 intentos excedidos) → POSIBLE BRUTE FORCE\n"
+                    "- 14 listados de usuarios (rol consulta)\n"
+                    "- 2 errores TLNT-007 (ERROR_VALIDACION) sin patron claro\n"
+                    "\n### Hipotesis\n"
+                    "Cuenta posiblemente bajo ataque. Recomiendo revisar IPs origen "
+                    "y considerar bloqueo temporal.\n"
+                    "\n(Mock — en modo real consulta patron 11 contra LA con datos reales)")}),
+    (0.2, {"type": "done"}),
+]
+
 MOCK_SEQUENCES = {
     "system-status": _SNAPSHOT,
     "errors-production": _ERRORS,
@@ -316,6 +340,7 @@ MOCK_SEQUENCES = {
     "payroll-slow": _PAYROLL_SLOW,
     "correlation-trace": _CORRELATION,
     "tlnt-lookup": _TLNT_LOOKUP,
+    "user-activity": _USER_ACTIVITY,
     "free-text": _FREE_TEXT,
 }
 

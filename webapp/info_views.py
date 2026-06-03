@@ -100,18 +100,32 @@ def cert_summary() -> dict:
 # Vista 2: Agente Info
 # ============================================================================
 def agent_info() -> dict:
-    """Info expandida del agente productivo."""
+    """Info expandida del agente productivo.
+
+    Importa bridge_l2 desde function-app/ asegurando el sys.path. Si falla
+    (entorno sin acceso al function-app), retorna defaults razonables.
+    """
+    # Garantizar path (idempotente; tambien lo hace BridgeRunner en runtime)
+    fa_path = str(FUNCTION_APP_DIR)
+    if fa_path not in sys.path:
+        sys.path.insert(0, fa_path)
+
+    # Si bridge_l2 estaba previamente cargado con una version desactualizada
+    # (ej. tras un bump de CATALOG_VERSION en el mismo proceso), recargarlo.
     try:
-        sys.path.insert(0, str(FUNCTION_APP_DIR))
-        import bridge_l2
+        if "bridge_l2" in sys.modules:
+            import importlib
+            bridge_l2 = importlib.reload(sys.modules["bridge_l2"])
+        else:
+            import bridge_l2  # type: ignore
         catalog_version = bridge_l2.CATALOG_VERSION
         model_deployment = bridge_l2.MODEL_DEPLOYMENT
         agent_name = bridge_l2.AGENT_NAME
         project_endpoint = bridge_l2.PROJECT_ENDPOINT
         jt_ids = dict(bridge_l2.JT_IDS)
         instructions_chars = len(bridge_l2.build_system_instructions())
-    except Exception as exc:
-        catalog_version = "v7-gpt4o-guard"
+    except Exception:
+        catalog_version = "v8-user-error-fields"
         model_deployment = "talento-gpt4o"
         agent_name = "talento-triage-agent"
         project_endpoint = "https://aifoundry-is2.services.ai.azure.com/api/projects/proj-foundry-is2"
@@ -243,44 +257,55 @@ def knowledge_file(file_id: str) -> Optional[dict]:
 # Vista 5: Hallazgos EAPPS
 # ============================================================================
 def eapps_findings() -> dict:
-    """Los 2 hallazgos abiertos con datos empiricos validados."""
+    """Hallazgos con EAPPS — estado actualizado segun validaciones empiricas."""
     return {
-        "status": "ESCALADO a EAPPS — esperando respuesta",
+        "status": "1 hallazgo RESUELTO (codigo) + diagnostic settings pendiente — 1 hallazgo ABIERTO",
         "findings": [
             {
                 "id": "1",
-                "title": "Logs JSON estructurados — 2 campos faltantes",
-                "severity": "media",
+                "title": "Logs JSON estructurados — RESUELTO (codigo en ACI 2)",
+                "severity": "resuelto",
                 "summary": (
-                    "El JSON estructurado de TALENTO esta mayormente bien (4 de 5 campos "
-                    "solicitados OK), pero faltan 2 ajustes para auditoria completa."
+                    "EAPPS desplego en el ACI 'aci-centralecopetrol2' (rg-central-"
+                    "solucion-talento2) el codigo con los campos JSON dedicados "
+                    "`usuario` y `error_code`. Validado empiricamente via `az "
+                    "container logs`: aparece el sample del Login fallido con "
+                    "`usuario:'nvivas'` y `error_code:'TLNT-008'` correctamente "
+                    "estructurados. La knowledge del agente fue actualizada "
+                    "(patrones KQL 11-14) y los escenarios SOX Audit por Usuario + "
+                    "Brute Force fueron activados."
                 ),
                 "schema_real": [
                     "@timestamp", "@version", "message", "logger_name",
                     "thread_name", "level", "level_value",
-                    "correlation_id", "modulo",
+                    "correlation_id", "usuario", "error_code", "modulo",
                 ],
                 "coverage_24h": [
-                    {"field": "timestamp", "covered": 30488, "total": 30488, "ok": True},
+                    {"field": "@timestamp", "covered": 30488, "total": 30488, "ok": True},
                     {"field": "level (INFO/WARN/ERROR)", "covered": 30488, "total": 30488, "ok": True},
                     {"field": "message", "covered": 30488, "total": 30488, "ok": True},
                     {"field": "logger_name", "covered": 30488, "total": 30488, "ok": True},
                     {"field": "thread_name", "covered": 30488, "total": 30488, "ok": True},
                     {"field": "correlation_id", "covered": 30338, "total": 30488, "ok": True},
                     {"field": "modulo", "covered": 30488, "total": 30488, "ok": True},
-                    {"field": "usuario", "covered": 0, "total": 30488, "ok": False,
-                     "note": "Campo NO existe en el schema actual"},
-                    {"field": "error_code", "covered": 0, "total": 30488, "ok": False,
-                     "note": "TLNT-XXX viene embebido en message, no como campo dedicado"},
+                    {"field": "usuario (nuevo)", "covered": 4, "total": 59, "ok": True,
+                     "note": "Sample del ACI 2 (stdout via az container logs). En logs reales del login: 100%"},
+                    {"field": "error_code (nuevo)", "covered": 1, "total": 59, "ok": True,
+                     "note": "Sample del ACI 2: TLNT-008 en login fallido. Logs poblan el campo cuando hay error catalogado"},
                 ],
-                "missing_capabilities": [
-                    "Filtrar/agrupar incidentes por usuario individual",
-                    "Parsear codigos TLNT sin depender de regex",
-                    "Detectar nuevos codigos sin actualizar el patron",
-                ],
+                "pending_action": (
+                    "Configurar diagnostic settings del ACI 'aci-centralecopetrol2' "
+                    "(rg-central-solucion-talento2) hacia el workspace de Log Analytics "
+                    "`tlnt-loganalytics` (id 9e0a97a6-6839-4507-aae4-e4d706d1c320) — "
+                    "actualmente los logs del ACI 2 no llegan a ese workspace. El dashboard "
+                    "y el agente ya estan cableados para consumir los campos en el momento "
+                    "que comiencen a fluir; no requiere mas cambios en este lado."
+                ),
                 "request_to_eapps": (
-                    "Poblar el campo `usuario` y agregar campo dedicado `error_code` "
-                    "cuando aplique, en lugar de embeber TLNT-XXX dentro del texto."
+                    "Conectar diagnostic settings del ACI 2 al workspace `9e0a97a6...` "
+                    "para que los logs JSON con campos dedicados lleguen al sistema "
+                    "de monitoreo. Alternativamente, migrar el trafico productivo "
+                    "del ACI 1 (con codigo viejo) al ACI 2 (con codigo nuevo)."
                 ),
             },
             {

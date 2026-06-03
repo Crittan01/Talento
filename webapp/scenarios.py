@@ -114,15 +114,19 @@ SCENARIOS = {
     "errors-production": {
         "title": "Errores Recientes",
         "icon": "🚨",
-        "subtitle": "ERROR/WARN agrupados + codigos TLNT activos",
+        "subtitle": "ERROR/WARN agrupados por error_code dedicado",
         "prompt": (
-            "Ejecuta directamente el job template id={jt_errors_analysis} "
-            "(talento-errors-analysis) con extra_vars_json='{{\"time_range_hours\": "
-            "{time_range_hours}}}' para detectar errores y warnings criticos en "
-            "TALENTO en las ultimas {time_range_hours} horas. Cuando termine, "
-            "sintetiza cuantos errores, cuantos warnings, severity_status, top "
-            "mensajes, codigos TLNT-XXX detectados (cita catalogo via file_search "
-            "para cada uno). Reporta en espanol."
+            "Detecta errores y warnings criticos en TALENTO de las ultimas "
+            "{time_range_hours} horas. Antes de la query usa file_search con "
+            "'detectar codigos TLNT patron 4' para obtener la query KQL que usa "
+            "`coalesce(tostring(p.error_code), extract regex)` (asi cuenta tanto "
+            "logs con campo dedicado como historicos). Tambien puedes ejecutar "
+            "JT id={jt_errors_analysis} (talento-errors-analysis) con extra_vars_json="
+            "'{{\"time_range_hours\": {time_range_hours}}}' como complemento. "
+            "Para cada codigo TLNT-XXX detectado cita textualmente del catalogo "
+            "via file_search. Sintetiza cuantos errores, cuantos warnings, top "
+            "mensajes, codigos TLNT, controllers afectados (logger_name). Reporta "
+            "en espanol."
         ),
         "expected_jt": JT_IDS["jt_errors_analysis"],
         "renderer": "errors",
@@ -207,50 +211,76 @@ SCENARIOS = {
         "icon": "🔐",
         "subtitle": "Logins privilegiados + acciones criticas por usuario",
         "prompt": (
-            "TALENTO es regulado por SOX. Ejecuta el job template id={jt_sox_audit} "
-            "(talento-sox-audit) con extra_vars_json='{{\"time_range_hours\": "
-            "{time_range_hours}}}' para auditar la actividad de las ultimas "
-            "{time_range_hours} horas. Sintetiza audit_status, logins por usuario, "
-            "acciones privilegiadas con rol, incidentes BD. Reporta en espanol con "
+            "TALENTO es regulado por SOX. Antes de formular cualquier query usa "
+            "file_search con 'auditoria SOX por usuario patron KQL' para obtener "
+            "el patron 13 de la guia KQL. Luego ejecuta query_log_analytics "
+            "agrupando logs de las ultimas {time_range_hours} horas por el campo "
+            "`usuario` (campo dedicado en el JSON estructurado) y clasificando "
+            "tipo_accion (login_ok, login_fail, listing, aprobacion, modificacion). "
+            "Si detectas codigos TLNT-XXX en error_code, cita su definicion via "
+            "file_search en el catalogo. Sintetiza usuarios con mas actividad, "
+            "acciones privilegiadas detectadas, anomalias. Reporta en espanol con "
             "enfasis en compliance."
         ),
-        "expected_jt": JT_IDS["jt_sox_audit"],
+        "expected_jt": None,
         "renderer": "sox",
-        "pain_point": "Objetos no autorizados BD + cumplimiento SOX",
+        "pain_point": "Cumplimiento SOX por usuario",
         "card_class": "card-critical",
         "free_text": False,
         "accepts_filters": ["time_range_hours"],
-        "tier": "pending",
-        "pending_eapps_reason": (
-            "Requiere campo `usuario` poblado en logs JSON estructurados "
-            "(hoy 0/30488 logs lo traen). Sin esto, la auditoria 'quien hizo que' "
-            "no es trazable."
-        ),
+        "tier": "primary",
     },
     "brute-force": {
         "title": "Deteccion de Brute Force",
         "icon": "🛡️",
-        "subtitle": "Multiples intentos de login fallidos por usuario",
+        "subtitle": "Intentos fallidos por usuario (TLNT-002/008/011)",
         "prompt": (
-            "Detecta intentos de brute force en TALENTO. Ejecuta el job template "
-            "id={jt_brute_force} (talento-brute-force-detector) con extra_vars_json="
-            "'{{\"time_range_hours\": {time_range_hours}, \"failed_threshold\": "
-            "{failed_threshold}}}' para identificar usuarios con {failed_threshold}+ "
-            "intentos fallidos. Sintetiza usuarios sospechosos, severidad "
-            "HIGH/MEDIUM/LOW, recomendacion de accion. Reporta en espanol."
+            "Detecta brute force en TALENTO. Antes de formular la query usa "
+            "file_search con 'brute force por usuario patron KQL' para obtener el "
+            "patron 12 de la guia KQL. Luego ejecuta query_log_analytics filtrando "
+            "logs de las ultimas {time_range_hours} horas con `error_code in "
+            "('TLNT-002','TLNT-008','TLNT-011')` (fallos de autenticacion segun "
+            "catalogo). Agrupa por campo `usuario` (dedicado en JSON), con umbral "
+            "de {failed_threshold}+ fallos. Para cada usuario sospechoso cita "
+            "definicion de los codigos TLNT via file_search. Sintetiza usuarios "
+            "afectados, severidad (HIGH si fails >= 10, MEDIUM si >= 5, LOW si <5), "
+            "primer/ultimo intento, recomendacion de accion (bloqueo, notificacion "
+            "a SOC). Reporta en espanol."
         ),
-        "expected_jt": JT_IDS["jt_brute_force"],
+        "expected_jt": None,
         "renderer": "brute-force",
-        "pain_point": "Accesos no autorizados",
+        "pain_point": "Accesos no autorizados — TLNT-002/008/011",
         "card_class": "card-critical",
         "free_text": False,
         "accepts_filters": ["time_range_hours", "failed_threshold"],
-        "tier": "pending",
-        "pending_eapps_reason": (
-            "Requiere codigos TLNT-002/008/011 (autenticacion) en logs reales + "
-            "campo `usuario` poblado. Hoy solo aparecen TLNT-001/003/004 y no hay "
-            "info de usuario, el JT devolveria 0 hits."
+        "tier": "primary",
+    },
+    "user-activity": {
+        "title": "Actividad por Usuario",
+        "icon": "👤",
+        "subtitle": "Logins, acciones y errores de un usuario especifico",
+        "prompt": (
+            "El operador investiga la actividad del usuario '{user_input}' en "
+            "TALENTO. Antes de formular la query usa file_search con 'actividad "
+            "por usuario patron KQL' para obtener el patron 11 de la guia KQL. "
+            "Luego ejecuta query_log_analytics filtrando por `tostring(p.usuario) "
+            "== '{user_input}'` en las ultimas {time_range_hours} horas. Devuelve "
+            "los logs en orden cronologico desc, con timestamp, level, error_code, "
+            "msg, correlation_id, logger. Si hay codigos TLNT-XXX cita catalogo "
+            "via file_search. Sintetiza patron de actividad (cuantos logins, "
+            "errores tipicos, modulos visitados), si hay senales de brute force "
+            "(varios TLNT-002/008/011) o de cuenta comprometida. Reporta en "
+            "espanol estructurado (Hallazgo, Hipotesis, Pasos, Accion)."
         ),
+        "expected_jt": None,
+        "renderer": "generic",
+        "pain_point": "Investigacion forense por usuario (campo `usuario` dedicado)",
+        "card_class": "card-info",
+        "free_text": True,
+        "free_text_label": "Username a investigar",
+        "free_text_placeholder": "Ej: jtorres, nvivas",
+        "accepts_filters": ["time_range_hours"],
+        "tier": "primary",
     },
     "performance-analysis": {
         "title": "Analisis de Performance",

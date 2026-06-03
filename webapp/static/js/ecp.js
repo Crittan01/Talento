@@ -806,6 +806,9 @@
           `;
         }
         const missing = (h.missing_capabilities || []).map(m => `<li>${escapeHtml(m)}</li>`).join('');
+        const pendingActionHtml = h.pending_action
+          ? `<div class="info-finding__pending"><strong>⏳ Pendiente:</strong> ${escapeHtml(h.pending_action)}</div>`
+          : '';
         return `
           <article class="info-finding info-finding--${escapeHtml(h.severity)}">
             <header class="info-finding__header">
@@ -815,6 +818,7 @@
             <p>${escapeHtml(h.summary)}</p>
             ${detail}
             ${missing ? `<h5>Capacidades perdidas mientras no se resuelva</h5><ul class="info-list">${missing}</ul>` : ''}
+            ${pendingActionHtml}
             <div class="info-finding__request">
               <strong>Pedido a EAPPS:</strong> ${escapeHtml(h.request_to_eapps)}
             </div>

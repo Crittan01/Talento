@@ -162,7 +162,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v7-gpt4o-guard"  # v7: gpt-4o full + safety guard deterministico en bridge contra dry_run=false sin operator_confirmed
+CATALOG_VERSION = "v8-user-error-fields"  # v8: knowledge actualizado con campos JSON dedicados `usuario` y `error_code` + patrones KQL 11-14 para audit por usuario y brute force con datos reales
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente

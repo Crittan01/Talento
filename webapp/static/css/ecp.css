@@ -1396,3 +1396,14 @@ body {
 .ecp-sidebar-card--secondary:hover {
   opacity: 1;
 }
+/* badge resuelto + nota pending_action en findings */
+.badge--resuelto { background: #d4f1e1; color: #1f7a4d; }
+.info-finding--resuelto { border-left: 4px solid #1f7a4d; }
+.info-finding__pending {
+  background: #fff8e7;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 10px;
+  border-left: 3px solid #d8a531;
+  font-size: 13px;
+}
