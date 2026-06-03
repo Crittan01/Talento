@@ -134,19 +134,33 @@ def normalize_payload(body: dict) -> Optional[str]:
     return None
 
 
+# Module-level flag: ensures create_version runs ONCE por instancia de
+# Function (cold start). Warm requests reusan la version creada. Cuando
+# se redeploya con nuevo codigo, el cold start nuevo crea otra version.
+_AGENT_SETUP_DONE = False
+
+
 def ensure_agent_ready(project) -> str:
-    """Verifica que el agente Foundry con AGENT_NAME actual exista.
-    Si no existe, lo crea con instructions + tools actualizadas."""
-    try:
-        versions = list(project.agents.list_versions(name=bridge_l2.AGENT_NAME))
-    except Exception:
-        versions = []
-    if versions:
-        logger.info(f"Agente '{bridge_l2.AGENT_NAME}' ya existe ({len(versions)} version(es))")
+    """Crea una nueva version del agente UNA vez por instancia de Function
+    (cold start). Foundry resuelve agent_reference a la version mas reciente.
+    """
+    global _AGENT_SETUP_DONE
+    if _AGENT_SETUP_DONE:
         return bridge_l2.AGENT_NAME
-    logger.info(f"Agente '{bridge_l2.AGENT_NAME}' no existe — creando...")
+    try:
+        existing = list(project.agents.list_versions(name=bridge_l2.AGENT_NAME))
+        prev_count = len(existing)
+    except Exception:
+        prev_count = 0
+    logger.info(
+        f"Setup '{bridge_l2.AGENT_NAME}' — versiones previas: {prev_count}"
+    )
     agent = bridge_l2.setup_agent_version(project)
-    logger.info(f"Agente creado: name={agent.name}")
+    logger.info(
+        f"Nueva version creada: name={agent.name} "
+        f"version={getattr(agent, 'version', '?')}"
+    )
+    _AGENT_SETUP_DONE = True
     return agent.name
 
 
@@ -181,6 +195,57 @@ def agent_info(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json",
         status_code=200,
     )
+
+
+@app.route(route="tool/exec", methods=["POST"])
+def tool_exec(req: func.HttpRequest) -> func.HttpResponse:
+    """Endpoint thin wrapper para ejecutar UN tool del bridge desde el cliente
+    de evaluacion. Permite que un cliente externo (sin acceso a AWX/LA) delegue
+    la ejecucion del tool al Function App productivo (que SI tiene acceso).
+
+    Payload:
+        {"tool": "query_log_analytics", "args": {"query": "..."}}
+        {"tool": "run_awx_job_template", "args": {"template_id": 36, "extra_vars": {}}}
+
+    Response: el resultado bruto del tool (dict).
+    """
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "Body invalido — debe ser JSON"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+
+    tool_name = body.get("tool")
+    args = body.get("args") or {}
+
+    try:
+        if tool_name == "query_log_analytics":
+            result = bridge_l2.execute_kql(args.get("query", ""))
+        elif tool_name == "run_awx_job_template":
+            template_id = args.get("template_id")
+            extra_vars = args.get("extra_vars") or {}
+            result = bridge_l2.run_awx_job_template(template_id, extra_vars=extra_vars)
+        else:
+            return func.HttpResponse(
+                json.dumps({"error": f"unknown tool: {tool_name}"}),
+                mimetype="application/json",
+                status_code=400,
+            )
+        return func.HttpResponse(
+            json.dumps(result, ensure_ascii=False),
+            mimetype="application/json",
+            status_code=200,
+        )
+    except Exception as exc:
+        logger.exception("tool/exec fallo")
+        return func.HttpResponse(
+            json.dumps({"error": str(exc), "type": type(exc).__name__}),
+            mimetype="application/json",
+            status_code=500,
+        )
 
 
 @app.route(route="run", methods=["POST"])
