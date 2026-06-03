@@ -193,6 +193,34 @@ SCENARIOS = {
         "accepts_filters": [],
         "tier": "primary",
     },
+    "top-codigos": {
+        "title": "Top Codigos TLNT",
+        "icon": "📊",
+        "subtitle": "Frecuencia de codigos de error en la ventana",
+        "prompt": (
+            "El operador pide el ranking de codigos TLNT en las ultimas "
+            "{time_range_hours} horas.\n\n"
+            "PASO 1: Llama a top_codigos_error con time_range_hours="
+            "{time_range_hours}. El bridge agrega por codigo y devuelve "
+            "ocurrencias, correlation_ids distintos, modulos y rango temporal. "
+            "NO escribas KQL.\n\n"
+            "PASO 2: Si la tool devuelve 0 filas, indica 'sin codigos de error "
+            "en la ventana'.\n\n"
+            "PASO 3: Para los 3-5 codigos mas frecuentes, consulta file_search "
+            "con cada codigo para citar su definicion del catalogo.\n\n"
+            "Sintetiza ranking, codigos predominantes con su definicion, "
+            "modulos mas afectados, ventana temporal, y recomendacion (mesa "
+            "de ayuda, escalado a EAPPS si hay codigos nuevos no catalogados). "
+            "Reporta en espanol estructurado."
+        ),
+        "expected_jt": None,
+        "renderer": "generic",
+        "pain_point": "Mesa de ayuda — distribucion de errores TLNT (6943 ocurrencias en 168h)",
+        "card_class": "card-info",
+        "free_text": False,
+        "accepts_filters": ["time_range_hours"],
+        "tier": "primary",
+    },
     "container-state": {
         "title": "Estado del Container",
         "icon": "📦",
@@ -222,20 +250,9 @@ SCENARIOS = {
         "subtitle": "Resumen agregado de actividad por usuario",
         "prompt": (
             "TALENTO es regulado por SOX. El operador pide auditar la actividad "
-            "de un usuario en las ultimas {time_range_hours} horas.\n\n"
-            "PASO 1: Llama a audit_user_activity con usuario='{user_input}' y "
-            "time_range_hours={time_range_hours}. El bridge construye la KQL "
-            "agregada — NO escribas KQL ni uses query_log_analytics.\n\n"
-            "PASO 2: Si la tool devuelve 0 filas, indica 'sin actividad del "
-            "usuario en la ventana' y sugiere ampliar rango o validar el "
-            "username.\n\n"
-            "PASO 3: Si hay actividad y aparecen codigos TLNT-XXX en el set "
-            "'codigos', consulta file_search por cada codigo distinto para citar "
-            "su definicion del catalogo.\n\n"
-            "Sintetiza: total eventos, ratio errores/warns, codigos vistos, "
-            "primera y ultima actividad, anomalias de compliance. Reporta en "
-            "espanol con enfasis SOX (separacion de funciones, accesos "
-            "privilegiados, etc.)."
+            "de un usuario en las ultimas {time_range_hours} horas. Bloqueado "
+            "hasta cerrar Hallazgo 2 (instrumentacion MDC). Mientras tanto "
+            "explica al operador el bloqueo."
         ),
         "expected_jt": None,
         "renderer": "sox",
@@ -245,28 +262,28 @@ SCENARIOS = {
         "free_text_label": "Usuario a auditar",
         "free_text_placeholder": "Ej: nvivas, jtorres",
         "accepts_filters": ["time_range_hours"],
-        "tier": "primary",
+        "tier": "pending",
+        "pending_eapps_reason": (
+            "Hallazgo 2 (NUEVO): la inspeccion empirica del workspace tlnt-loganalytics "
+            "(30523 eventos JSON en 168h sobre ContainerInstanceLog_CL) confirma que el "
+            "JSON estructurado NO contiene ningun campo de identidad (usuario, user, "
+            "userName, principalName). EAPPS dijo que existia `usuario` pero no es asi. "
+            "El unico correlador es `correlation_id`. Pendiente instrumentar Logback "
+            "MDC con el principal autenticado para que aparezca como top-level del JSON. "
+            "Hasta entonces, auditoria por usuario es inviable; alternativa: cruzar "
+            "correlation_id contra Azure AD / API gateway manualmente."
+        ),
     },
     "brute-force": {
         "title": "Deteccion de Brute Force",
         "icon": "🛡️",
         "subtitle": "Intentos fallidos por usuario (TLNT-002/008/011)",
         "prompt": (
-            "Detecta brute force en TALENTO sobre las ultimas {time_range_hours} "
-            "horas, con umbral de {failed_threshold} fallos por usuario.\n\n"
-            "PASO 1: Llama a detect_brute_force con time_range_hours="
-            "{time_range_hours} y threshold={failed_threshold}. El bridge "
-            "agrupa por usuario los fallos de auth (TLNT-002, TLNT-008, "
-            "TLNT-011) — NO escribas KQL ni uses query_log_analytics.\n\n"
-            "PASO 2: Si la tool devuelve 0 filas, indica 'sin patrones de "
-            "brute force en la ventana con umbral {failed_threshold}' y opcionalmente "
-            "sugiere bajar el threshold.\n\n"
-            "PASO 3: Para cada usuario sospechoso devuelto, cita la definicion "
-            "de los codigos TLNT involucrados consultando file_search (no "
-            "ejecutes mas tools de logs).\n\n"
-            "Sintetiza usuarios afectados, severidad (HIGH si fails >= 10, "
-            "MEDIUM si >= 5, LOW si < 5), primer/ultimo intento, recomendacion "
-            "(bloqueo, notificacion a SOC). Reporta en espanol."
+            "Detectar brute force agrupado por usuario. Bloqueado hasta cerrar "
+            "Hallazgo 2 (instrumentacion MDC con principal autenticado). "
+            "Explica al operador el bloqueo y ofrece alternativa: top_codigos_error "
+            "con foco en TLNT-002/008/011 muestra el VOLUMEN de fallos de auth "
+            "aunque no se pueda agrupar por usuario."
         ),
         "expected_jt": None,
         "renderer": "brute-force",
@@ -274,37 +291,43 @@ SCENARIOS = {
         "card_class": "card-critical",
         "free_text": False,
         "accepts_filters": ["time_range_hours", "failed_threshold"],
-        "tier": "primary",
+        "tier": "pending",
+        "pending_eapps_reason": (
+            "Hallazgo 2 (NUEVO): el JSON estructurado no contiene campo de identidad. "
+            "Sin `usuario` en el MDC, no podemos agrupar fallos de auth por principal "
+            "y por tanto no podemos hablar de brute force por usuario. Alternativa: "
+            "usar `top_codigos_error` para ver el VOLUMEN de TLNT-002/008/011 en "
+            "ventana — si hay pico agregado, escalar a investigacion manual via "
+            "correlation_id."
+        ),
     },
     "user-activity": {
         "title": "Actividad por Usuario",
         "icon": "👤",
         "subtitle": "Resumen agregado de logins, acciones y errores",
         "prompt": (
-            "El operador investiga la actividad del usuario '{user_input}' en "
-            "TALENTO sobre las ultimas {time_range_hours} horas.\n\n"
-            "PASO 1: Llama a audit_user_activity con usuario='{user_input}' y "
-            "time_range_hours={time_range_hours}. El bridge devuelve resumen "
-            "agregado (total eventos, errores, warns, codigos vistos, primera "
-            "y ultima actividad). NO escribas KQL.\n\n"
-            "PASO 2: Si la tool devuelve 0 filas, reporta 'sin actividad' y "
-            "sugiere ampliar rango o validar el username.\n\n"
-            "PASO 3: Si aparecen codigos TLNT-XXX en el set 'codigos', "
-            "consulta file_search por cada codigo distinto (NO mas tools de logs).\n\n"
-            "Sintetiza patron de actividad (cantidad de logins ok vs fail, "
-            "errores tipicos, modulos visitados), señales de brute force "
-            "(varios TLNT-002/008/011) o cuenta comprometida. Reporta en espanol "
-            "estructurado (Hallazgo, Hipotesis, Pasos, Accion)."
+            "Investigacion forense por usuario. Bloqueado hasta cerrar Hallazgo 2 "
+            "(MDC). Mientras tanto, sugiere al operador usar correlation_id como "
+            "alternativa: si conoce un correlation_id de la sesion del usuario "
+            "(via API gateway o Azure AD), puede invocar el escenario 'Investigar "
+            "Correlation ID' para reconstruir el viaje de UN request especifico."
         ),
         "expected_jt": None,
         "renderer": "generic",
-        "pain_point": "Investigacion forense por usuario (campo `usuario` dedicado)",
+        "pain_point": "Investigacion forense por usuario",
         "card_class": "card-info",
         "free_text": True,
         "free_text_label": "Username a investigar",
         "free_text_placeholder": "Ej: jtorres, nvivas",
         "accepts_filters": ["time_range_hours"],
-        "tier": "primary",
+        "tier": "pending",
+        "pending_eapps_reason": (
+            "Hallazgo 2 (NUEVO): no hay campo de identidad en el JSON de logs. "
+            "Mientras EAPPS no instrumente el MDC, no podemos filtrar por usuario. "
+            "Alternativa actual: si el operador tiene un correlation_id "
+            "(via Azure AD signin logs o gateway), reconstruir el viaje del "
+            "request via el escenario 'Investigar Correlation ID'."
+        ),
     },
     "performance-analysis": {
         "title": "Analisis de Performance",

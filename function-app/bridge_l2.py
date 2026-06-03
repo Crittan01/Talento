@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v11-tools-especializadas"  # v11: refactor arquitectonico. El bridge construye la KQL (4 tools especializadas con parametros tipados: lookup_correlation_id, lookup_tlnt_code, audit_user_activity, detect_brute_force) en lugar de que el agente improvise KQL libre. query_log_analytics queda como escape hatch. Scenarios primary (correlation-trace, sox-audit, brute-force, user-activity) reescritos para llamar a la tool especializada en lugar de pedirle al agente que escriba KQL. Elimina la familia de errores 'invento de campos / discovery union*  / context_length_exceeded'
+CATALOG_VERSION = "v12-codigo_error-no-usuario"  # v12: inspeccion empirica del workspace (30523 eventos JSON en 168h) confirma que (1) el campo de error se llama `codigo_error` en ESPANOL (no `error_code`), (2) NO existe campo de identidad de usuario en el JSON. Builders renombrados a p.codigo_error. Tools audit_user_activity y detect_brute_force REMOVIDAS hasta cerrar Hallazgo 2 (instrumentar Logback MDC). Nueva tool top_codigos_error para auditoria agregada sin identidad. scenarios sox-audit/brute-force/user-activity movidos a tier=pending con razon explicita. Knowledge actualizado con esquema real y patrones 11-14 marcados BLOQUEADOS
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -257,6 +257,12 @@ def _escape(value: str) -> str:
 
 
 def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
+    """Reconstruye el viaje de una peticion HTTP por correlation_id.
+    Esquema real (inspeccion empirica del workspace): el JSON en Message tiene
+    `correlation_id` (99.5% cobertura) y `codigo_error` (22.7%, en ESPANOL).
+    NO existe campo de identidad `usuario`/`user`/`userId` — el correlador
+    unico es correlation_id.
+    """
     cid = _escape(correlation_id)
     hours = max(1, min(int(time_range_hours or 12), 168))
     return (
@@ -267,8 +273,8 @@ def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
         f"| where tostring(p.correlation_id) == '{cid}'\n"
         "| project TimeGenerated, Tabla, "
         "level = tostring(p.level), "
-        "error_code = tostring(p.error_code), "
-        "usuario = tostring(p.usuario), "
+        "codigo_error = tostring(p.codigo_error), "
+        "modulo = tostring(p.modulo), "
         "logger = tostring(p.logger_name), "
         "msg = substring(tostring(p.message), 0, 300)\n"
         "| order by TimeGenerated asc\n"
@@ -276,19 +282,23 @@ def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
     )
 
 
-def kql_tlnt_lookup(error_code: str, time_range_hours: int) -> str:
-    code = _escape(error_code)
+def kql_tlnt_lookup(codigo_error: str, time_range_hours: int) -> str:
+    """Recupera ocurrencias de un codigo TLNT del catalogo TALENTO.
+    Usa el campo real `codigo_error` (en espanol) con fallback regex sobre
+    Message para logs viejos sin JSON estructurado.
+    """
+    code = _escape(codigo_error)
     hours = max(1, min(int(time_range_hours or 12), 168))
     return (
         "union withsource=Tabla *\n"
         f"| where TimeGenerated >= ago({hours}h)\n"
         "| extend p = parse_json(Message)\n"
-        f"| extend codigo = coalesce(tostring(p.error_code), extract('(TLNT-[0-9]+)', 1, Message))\n"
+        f"| extend codigo = coalesce(tostring(p.codigo_error), extract('(TLNT-[0-9]+)', 1, Message))\n"
         f"| where codigo == '{code}'\n"
         "| project TimeGenerated, Tabla, "
-        "usuario = tostring(p.usuario), "
         "correlation_id = tostring(p.correlation_id), "
         "level = tostring(p.level), "
+        "modulo = tostring(p.modulo), "
         "logger = tostring(p.logger_name), "
         "msg = substring(tostring(p.message), 0, 300)\n"
         "| order by TimeGenerated desc\n"
@@ -296,46 +306,37 @@ def kql_tlnt_lookup(error_code: str, time_range_hours: int) -> str:
     )
 
 
-def kql_user_audit(usuario: str, time_range_hours: int) -> str:
-    user = _escape(usuario)
-    hours = max(1, min(int(time_range_hours or 12), 168))
+# Builders por usuario REMOVIDOS hasta que EAPPS instrumente identidad en MDC.
+# Razon: la inspeccion empirica del workspace (30523 eventos JSON en 168h)
+# no encontro ningun campo de identidad (`usuario`, `user`, `userName`,
+# `principalName`, etc) en el JSON top-level. El unico correlador disponible
+# es `correlation_id` (UUID por request).
+# Hallazgo 2 (NUEVO, sumar al backlog EAPPS): "Instrumentar Logback con el
+# principal autenticado en el MDC para que aparezca como key top-level del
+# JSON. Sin esto, las queries SOX por usuario son inviables."
+
+
+def kql_top_codigos_error(time_range_hours: int) -> str:
+    """Top de codigos de error TLNT por frecuencia en la ventana — NO
+    requiere identidad de usuario. Util como demo SOX agregada mientras
+    EAPPS no instrumente el MDC.
+    """
+    hours = max(1, min(int(time_range_hours or 24), 168))
     return (
         "union withsource=Tabla *\n"
         f"| where TimeGenerated >= ago({hours}h)\n"
-        f"| where Message has '{user}'\n"
         "| extend p = parse_json(Message)\n"
-        f"| where tostring(p.usuario) == '{user}'\n"
+        "| extend codigo = coalesce(tostring(p.codigo_error), extract('(TLNT-[0-9]+)', 1, Message))\n"
+        "| where isnotempty(codigo)\n"
         "| summarize "
-        "total_eventos = count(), "
-        "errores = countif(tostring(p.level) == 'ERROR'), "
-        "warns = countif(tostring(p.level) == 'WARN'), "
-        "codigos = make_set(tostring(p.error_code), 10), "
-        "loggers = make_set(tostring(p.logger_name), 5), "
-        "primera_actividad = min(TimeGenerated), "
-        "ultima_actividad = max(TimeGenerated) "
-        "by usuario = tostring(p.usuario)\n"
-        "| take 5"
-    )
-
-
-def kql_brute_force(time_range_hours: int, threshold: int) -> str:
-    hours = max(1, min(int(time_range_hours or 12), 168))
-    thr = max(2, int(threshold or 5))
-    return (
-        "union withsource=Tabla *\n"
-        f"| where TimeGenerated >= ago({hours}h)\n"
-        "| extend p = parse_json(Message)\n"
-        "| where tostring(p.error_code) in ('TLNT-002', 'TLNT-008', 'TLNT-011')\n"
-        "| extend usuario = tostring(p.usuario)\n"
-        "| where isnotempty(usuario)\n"
-        "| summarize fails = count(), "
-        "codigos = make_set(tostring(p.error_code)), "
+        "ocurrencias = count(), "
+        "correlation_ids_distintos = dcount(tostring(p.correlation_id)), "
+        "modulos = make_set(tostring(p.modulo), 5), "
         "primera = min(TimeGenerated), "
         "ultima = max(TimeGenerated) "
-        "by usuario\n"
-        f"| where fails >= {thr}\n"
-        "| order by fails desc\n"
-        "| take 30"
+        "by codigo\n"
+        "| order by ocurrencias desc\n"
+        "| take 20"
     )
 
 
@@ -539,19 +540,25 @@ def build_system_instructions() -> str:
         "    una peticion HTTP especifica. El bridge arma la KQL — tu solo das el "
         "    UUID y las horas. USALA para todo escenario de 'investigar correlation_id'.\n\n"
         "1b. lookup_tlnt_code(error_code, time_range_hours): muestra instancias "
-        "    recientes de un codigo TLNT-XXX con usuario, correlation_id y mensaje. "
-        "    USALA cuando quieras ver donde ocurrio un codigo concreto.\n\n"
-        "1c. audit_user_activity(usuario, time_range_hours): resumen agregado de "
-        "    actividad por usuario (eventos, errores, codigos vistos, primera y "
-        "    ultima actividad). USALA para auditoria SOX o duda sobre un usuario.\n\n"
-        "1d. detect_brute_force(time_range_hours, threshold): usuarios con N o "
-        "    mas fallos de auth (TLNT-002/008/011). USALA para sospecha de brute "
-        "    force.\n\n"
+        "    recientes de un codigo TLNT-XXX con correlation_id, level, modulo y "
+        "    mensaje. USALA cuando quieras ver donde ocurrio un codigo concreto.\n\n"
+        "1c. top_codigos_error(time_range_hours): top de codigos TLNT por "
+        "    frecuencia con correlation_ids distintos. NO requiere identidad. "
+        "    USALA para mesa de ayuda / auditoria agregada / picos.\n\n"
         "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de las "
-        "    4 anteriores cubre el caso (queries ad-hoc del operador en escenario "
-        "    'tlnt-lookup' libre). Para correlation_id, codigos TLNT, audit por "
-        "    usuario o brute force, USA SIEMPRE la tool especializada — escribir "
-        "    KQL libre cuando hay una especializada se considera error.\n\n"
+        "    3 anteriores cubre el caso (queries ad-hoc del operador). Para "
+        "    correlation_id, codigos TLNT y top de codigos USA SIEMPRE la tool "
+        "    especializada — escribir KQL libre cuando hay una especializada se "
+        "    considera error.\n\n"
+        "**BLOQUEO CONOCIDO** — el JSON estructurado no contiene campo de "
+        "identidad de usuario. Si el operador pide 'auditar usuario X', "
+        "'actividad de Y', 'brute force por usuario', responde explicitamente: "
+        "'Bloqueado por Hallazgo 2 (EAPPS): el logger no instrumenta el "
+        "principal autenticado en el MDC. Inspeccion del workspace en 168h "
+        "confirma 30523 eventos JSON sin campo `usuario`. Pendiente "
+        "instrumentar Logback. Mientras tanto puedo: (a) listar top codigos "
+        "TLNT, (b) reconstruir un correlation_id si lo tienes, (c) cruzar "
+        "manualmente con Azure AD/API gateway via correlation_id.'\n\n"
         "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
         "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
         "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
@@ -647,23 +654,24 @@ TOOL_QUERY_LA = FunctionTool(
         "discovery amplio tipo 'union withsource=Tabla *' antes. Si necesitas "
         "explorar tablas, hazlo solo cuando el usuario pregunta de forma "
         "abierta sin criterios.\n\n"
-        "ESQUEMA REAL (validado con EAPPS — usa estos nombres EXACTOS, no "
-        "improvises traducciones):\n"
-        "  - El log estructurado vive en el campo `Message` (no `message`, "
-        "no `Body`) y SIEMPRE se decodifica con `extend p = parse_json(Message)`.\n"
-        "  - Codigo TLNT del catalogo: `tostring(p.error_code)` (en INGLES). "
-        "NO existe `codigo_error`, NO existe `ErrorCode` top-level.\n"
-        "  - Usuario afectado: `tostring(p.usuario)` (en ESPANOL). NO existe "
-        "`UserId`, NO existe `userName`.\n"
-        "  - Correlacion: `tostring(p.correlation_id)`.\n"
-        "  - Nivel de severidad: `tostring(p.level)` con valores ERROR/WARN/INFO.\n"
+        "ESQUEMA REAL (validado por inspeccion directa del workspace, "
+        "30523 eventos JSON en 168h en tabla ContainerInstanceLog_CL):\n"
+        "  - El log estructurado vive en el campo `Message` (con M mayuscula) "
+        "y SIEMPRE se decodifica con `extend p = parse_json(Message)`.\n"
+        "  - Codigo TLNT: `tostring(p.codigo_error)` (en ESPANOL, 22.7% "
+        "de cobertura). NO existe `error_code` (ingles), NO existe `ErrorCode` "
+        "top-level. Para logs viejos sin codigo estructurado usa fallback "
+        "regex: `extract('(TLNT-[0-9]+)', 1, Message)`.\n"
+        "  - Correlacion: `tostring(p.correlation_id)` (99.5% cobertura).\n"
+        "  - Nivel de severidad: `tostring(p.level)` con valores INFO/WARN/ERROR.\n"
+        "  - Modulo: `tostring(p.modulo)` (valor tipico 'talento').\n"
         "  - Logger: `tostring(p.logger_name)`.\n"
-        "  - Fallback regex para logs viejos sin error_code estructurado: "
-        "`extract('(TLNT-[0-9]+)', 1, Message)`.\n\n"
-        "ANTES de mandar una query nueva con campos que no hayas usado en "
-        "este run, consulta file_search con 'patron KQL <caso>' (correlation_id, "
-        "audit usuario, brute force, conteo TLNT, etc.) y copia el patron "
-        "documentado en lugar de adivinar nombres."
+        "  - Mensaje libre: `tostring(p.message)` (m minuscula dentro del JSON).\n"
+        "  - **NO EXISTE ningun campo de identidad de usuario** (`usuario`, "
+        "`user`, `userName`, `principalName`, etc). El JSON no contiene "
+        "principal autenticado. Pendiente EAPPS Hallazgo 2 (instrumentar "
+        "Logback MDC). Cualquier query que filtre por usuario devolvera "
+        "0 filas — RECHAZALA explicitamente y reporta el bloqueo."
     ),
     parameters={
         "type": "object",
@@ -749,55 +757,31 @@ TOOL_LOOKUP_TLNT = FunctionTool(
     strict=True,
 )
 
-TOOL_AUDIT_USER = FunctionTool(
-    name="audit_user_activity",
-    description=(
-        "Resumen agregado de actividad de un usuario: total eventos, errores, "
-        "warns, set de codigos TLNT, set de loggers, primera y ultima "
-        "actividad en la ventana. Bridge agrega `summarize` en KQL — NO "
-        "devuelve eventos crudos. Usala para auditoria SOX por usuario o "
-        "verificar si un usuario tuvo actividad sospechosa."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "usuario": {
-                "type": "string",
-                "description": "Nombre de usuario exacto como aparece en p.usuario (ej. 'nvivas').",
-            },
-            "time_range_hours": {
-                "type": "integer",
-                "description": "Ventana hacia atras (default 12, max 168).",
-            },
-        },
-        "required": ["usuario", "time_range_hours"],
-        "additionalProperties": False,
-    },
-    strict=True,
-)
+# TOOL_AUDIT_USER y TOOL_BRUTE_FORCE REMOVIDOS hasta cerrar Hallazgo 2.
+# Inspeccion empirica del workspace (30523 eventos JSON en 168h) confirmo que
+# NO existe ningun campo de identidad en el JSON top-level. Estas tools
+# devolvian sistemicamente 0 filas. Se reintroduciran cuando EAPPS
+# instrumente Logback con el principal autenticado en el MDC.
 
-TOOL_BRUTE_FORCE = FunctionTool(
-    name="detect_brute_force",
+TOOL_TOP_CODIGOS = FunctionTool(
+    name="top_codigos_error",
     description=(
-        "Detecta usuarios con N o mas fallos de autenticacion (TLNT-002 "
-        "credenciales invalidas, TLNT-008 token expirado, TLNT-011 cuenta "
-        "bloqueada) en la ventana, agrupados por usuario. Bridge construye "
-        "summarize por usuario. Sin parametros libres ni KQL. Usala para "
-        "detectar brute force / accesos sospechosos."
+        "Top de codigos TLNT por frecuencia en la ventana, con cuenta de "
+        "ocurrencias, correlation_ids distintos y modulos donde aparecen. "
+        "Bridge agrega summarize por codigo. Util para mesa de ayuda "
+        "(que codigos predominan), auditoria SOX agregada (volumen por "
+        "tipo de error) y para detectar picos. NO requiere identidad de "
+        "usuario — el agregador es el codigo en si."
     ),
     parameters={
         "type": "object",
         "properties": {
             "time_range_hours": {
                 "type": "integer",
-                "description": "Ventana hacia atras (default 12, max 168).",
-            },
-            "threshold": {
-                "type": "integer",
-                "description": "Minimo de fallos para considerar sospechoso (default 5).",
+                "description": "Ventana hacia atras (default 24, max 168).",
             },
         },
-        "required": ["time_range_hours", "threshold"],
+        "required": ["time_range_hours"],
         "additionalProperties": False,
     },
     strict=True,
@@ -912,8 +896,7 @@ def setup_agent_version(project: AIProjectClient):
     tools = [
         TOOL_LOOKUP_CID,
         TOOL_LOOKUP_TLNT,
-        TOOL_AUDIT_USER,
-        TOOL_BRUTE_FORCE,
+        TOOL_TOP_CODIGOS,
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -1056,6 +1039,8 @@ def process_response_items(
                     query=query, emit=emit, call_id=item.call_id,
                 ))
             elif item.name == "lookup_tlnt_code":
+                # El parametro de la tool sigue llamandose error_code (lo que
+                # ve el LLM) pero el builder usa el campo real codigo_error.
                 code = args.get("error_code", "")
                 hrs = int(args.get("time_range_hours") or 12)
                 if force_extra_vars and "time_range_hours" in force_extra_vars:
@@ -1066,28 +1051,14 @@ def process_response_items(
                     args_for_event={"error_code": code, "time_range_hours": hrs},
                     query=query, emit=emit, call_id=item.call_id,
                 ))
-            elif item.name == "audit_user_activity":
-                usr = args.get("usuario", "")
-                hrs = int(args.get("time_range_hours") or 12)
+            elif item.name == "top_codigos_error":
+                hrs = int(args.get("time_range_hours") or 24)
                 if force_extra_vars and "time_range_hours" in force_extra_vars:
                     hrs = int(force_extra_vars["time_range_hours"])
-                query = kql_user_audit(usr, hrs)
+                query = kql_top_codigos_error(hrs)
                 fn_outputs.append(_run_specialized_kql(
-                    hop=hop, tool_name="audit_user_activity",
-                    args_for_event={"usuario": usr, "time_range_hours": hrs},
-                    query=query, emit=emit, call_id=item.call_id,
-                ))
-            elif item.name == "detect_brute_force":
-                hrs = int(args.get("time_range_hours") or 12)
-                if force_extra_vars and "time_range_hours" in force_extra_vars:
-                    hrs = int(force_extra_vars["time_range_hours"])
-                thr = int(args.get("threshold") or 5)
-                if force_extra_vars and "failed_threshold" in force_extra_vars:
-                    thr = int(force_extra_vars["failed_threshold"])
-                query = kql_brute_force(hrs, thr)
-                fn_outputs.append(_run_specialized_kql(
-                    hop=hop, tool_name="detect_brute_force",
-                    args_for_event={"time_range_hours": hrs, "threshold": thr},
+                    hop=hop, tool_name="top_codigos_error",
+                    args_for_event={"time_range_hours": hrs},
                     query=query, emit=emit, call_id=item.call_id,
                 ))
             # ---- Escape hatch: query_log_analytics (query libre) ----
