@@ -31,7 +31,7 @@
     {% endif %}
   </div>
 
-  <!-- ============ Filter bar (solo filtros globales) ============ -->
+  <!-- ============ Filter bar (filtros globales) ============ -->
   <div class="ecp-filterbar" id="filterbar">
     <div class="ecp-filterbar__group">
       <label for="filterTimeRange" class="ecp-filterbar__label">⏱️ Analizar últimas:</label>
@@ -44,9 +44,17 @@
         <option value="168">7 días</option>
       </select>
     </div>
+    <div class="ecp-filterbar__group">
+      <label for="filterThreshold" class="ecp-filterbar__label">🛡️ Umbral brute-force:</label>
+      <select id="filterThreshold" class="ecp-filterbar__select">
+        <option value="3">3 intentos</option>
+        <option value="5" selected>5 intentos</option>
+        <option value="10">10 intentos</option>
+        <option value="20">20 intentos</option>
+      </select>
+    </div>
     <div class="ecp-filterbar__hint" id="filterHint">
-      Filtro global: aplica a todos los escenarios que lo soporten. El umbral
-      de brute-force se configura dentro de su card.
+      Los filtros aplican a los escenarios que los soporten (chip "filtros: ..." en la card).
     </div>
   </div>
 

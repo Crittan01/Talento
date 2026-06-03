@@ -51,15 +51,20 @@
   // Filter bar — gestiona valores actuales y visibilidad del threshold
   // -------------------------------------------------------------------------
   function readFilters() {
+    // Defensivo: si algun elemento no existe en el DOM, usar default.
+    // Evita romper handlers cuando el template oculta un filtro inline.
     return {
-      time_range_hours: parseInt(el.filterTimeRange.value, 10),
-      failed_threshold: parseInt(el.filterThreshold.value, 10),
+      time_range_hours: el.filterTimeRange
+        ? parseInt(el.filterTimeRange.value, 10) : 24,
+      failed_threshold: el.filterThreshold
+        ? parseInt(el.filterThreshold.value, 10) : 5,
     };
   }
   function updateFilterHint() {
+    if (!el.filterHint) return;
     const f = readFilters();
     el.filterHint.textContent =
-      `Filtro global: ${f.time_range_hours}h. Umbral brute-force: ${f.failed_threshold} (configurable en la card).`;
+      `Filtro global: ${f.time_range_hours}h. Umbral brute-force: ${f.failed_threshold}.`;
   }
   [el.filterTimeRange, el.filterThreshold].forEach(s => {
     if (!s) return;
