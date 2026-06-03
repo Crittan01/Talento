@@ -61,9 +61,10 @@ def _ensure_foundry_agent() -> None:
             endpoint=bridge_l2.PROJECT_ENDPOINT,
             credential=DefaultAzureCredential(exclude_environment_credential=True),
         )
-        # ¿El agente ya tiene versiones registradas?
+        # ¿El agente ya tiene versiones registradas? La SDK pide agent_name=
+        # (no name=) — si se pasa mal cae a [] y siempre re-crea version.
         try:
-            versions = list(project.agents.list_versions(name=bridge_l2.AGENT_NAME))
+            versions = list(project.agents.list_versions(agent_name=bridge_l2.AGENT_NAME))
         except Exception:
             versions = []
         if versions:

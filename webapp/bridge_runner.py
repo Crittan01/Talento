@@ -15,9 +15,19 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-# Importar bridge_l2 del directorio padre
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Importar bridge_l2 desde function-app/. Es la UNICA fuente de verdad —
+# antes habia un fosil bridge_l2.py en la raiz del repo (con AGENT_NAME
+# viejo de hash 7efddc) que se colaba via parent.parent y hacia que la
+# webapp hablara con un agente distinto al que el bridge productivo
+# actualiza con cada deploy.
+_FUNCTION_APP_DIR = Path(__file__).resolve().parent.parent / "function-app"
+sys.path.insert(0, str(_FUNCTION_APP_DIR))
 import bridge_l2  # noqa: E402
+assert Path(bridge_l2.__file__).resolve().parent == _FUNCTION_APP_DIR, (
+    f"bridge_l2 importado desde {bridge_l2.__file__!r}, esperaba "
+    f"{_FUNCTION_APP_DIR!r}. Verifica que no exista otro bridge_l2.py "
+    f"en el PYTHONPATH (raiz del repo, .venv, etc)."
+)
 
 from .event_bus import bus  # noqa: E402
 

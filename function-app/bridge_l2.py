@@ -29,7 +29,6 @@ Referencias oficiales:
     https://ansible.readthedocs.io/projects/awx/en/latest/rest_api/api_ref.html
 """
 
-import hashlib
 import json
 import sys
 import time
