@@ -136,9 +136,21 @@
     // Evitar trigger si el click fue dentro del filtro inline
     if (e.target.closest('[data-stop-click="true"]')) return;
 
+    // Cards de info NO disparan run (las maneja sidebar.addEventListener via data-info-view)
+    if (card.dataset.infoView) return;
+
+    // Pending de EAPPS: mostrar tooltip explicativo en lugar de ejecutar
+    if (card.dataset.tier === 'pending') {
+      const reason = card.title || 'Esperando EAPPS';
+      alert(`Este escenario esta esperando que EAPPS habilite el dato necesario.\n\n${reason}`);
+      return;
+    }
+
     const sid = card.dataset.scenarioId;
     const renderer = card.dataset.renderer;
     const freeText = card.dataset.freeText === 'true';
+    const freeTextLabel = card.dataset.freeTextLabel || 'Pregunta libre al agente';
+    const freeTextPlaceholder = card.dataset.freeTextPlaceholder || 'Escribe tu pregunta...';
 
     // Determinar qué filtros aplican a esta card
     const acceptsFilters = (card.dataset.acceptsFilters || '').split(',').filter(Boolean);
@@ -149,7 +161,7 @@
     });
 
     if (freeText) {
-      openFreeTextModal(card, sid, renderer);
+      openFreeTextModal(card, sid, renderer, filters, freeTextLabel, freeTextPlaceholder);
     } else {
       runScenario(card, sid, renderer, null, filters);
     }
@@ -160,29 +172,36 @@
   // -------------------------------------------------------------------------
   // Free-text modal
   // -------------------------------------------------------------------------
-  function openFreeTextModal(card, sid, renderer) {
+  function openFreeTextModal(card, sid, renderer, filters, label, placeholder) {
     el.modalInput.value = '';
+    el.modalInput.placeholder = placeholder || 'Escribe aqui...';
+    // Customizar label del modal segun el escenario
+    const modalHeader = el.modal.querySelector('.ecp-modal__header strong');
+    if (modalHeader && label) modalHeader.textContent = label;
     el.modal.classList.add('is-open');
     el.modalInput.focus();
     state._pendingCard = card;
     state._pendingSid = sid;
     state._pendingRenderer = renderer;
+    state._pendingFilters = filters || {};
   }
   function closeFreeTextModal() {
     el.modal.classList.remove('is-open');
     state._pendingCard = null;
+    state._pendingFilters = null;
   }
   el.modalCancel.addEventListener('click', closeFreeTextModal);
   el.modalCancelX.addEventListener('click', closeFreeTextModal);
   el.modalRun.addEventListener('click', () => {
     const txt = el.modalInput.value.trim();
     if (!txt) {
-      alert('Escribe una pregunta primero.');
+      alert('Escribe algo primero.');
       el.modalInput.focus();
       return;
     }
+    const filters = state._pendingFilters || {};
     closeFreeTextModal();
-    runScenario(state._pendingCard, state._pendingSid, state._pendingRenderer, txt, {});
+    runScenario(state._pendingCard, state._pendingSid, state._pendingRenderer, txt, filters);
   });
 
   // -------------------------------------------------------------------------

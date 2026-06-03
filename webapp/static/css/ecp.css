@@ -1328,3 +1328,71 @@ body {
   padding: 1px 5px;
   border-radius: 3px;
 }
+
+/* ============================================================================
+   Sidebar — subtitulos de seccion + cards por tier
+   ============================================================================ */
+.ecp-sidebar__subtitle {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ecp-sidebar__subtitle::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--neutral-bg);
+}
+
+/* ----- Tier PENDING (esperando EAPPS) ----- */
+.ecp-sidebar-card--pending {
+  background: #f7f8fa !important;
+  border-left: 3px solid #b8c2cc !important;
+  cursor: not-allowed;
+  opacity: 0.85;
+  position: relative;
+}
+.ecp-sidebar-card--pending:hover {
+  background: #f0f3f7 !important;
+  border-left-color: #d8a531 !important;
+  opacity: 1;
+}
+.ecp-sidebar-card--pending .ecp-sidebar-card__icon,
+.ecp-sidebar-card--pending .ecp-sidebar-card__title {
+  filter: grayscale(0.5);
+  color: var(--text-muted) !important;
+}
+.ecp-sidebar-card--pending:hover .ecp-sidebar-card__icon,
+.ecp-sidebar-card--pending:hover .ecp-sidebar-card__title {
+  filter: grayscale(0);
+  color: var(--ecp-dark-teal) !important;
+}
+.ecp-sidebar-card__pending-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: #fff5d6;
+  color: #8a6c1b;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+/* ----- Tier SECONDARY ----- */
+.ecp-sidebar-card--secondary {
+  background: #fafbfc;
+  opacity: 0.92;
+}
+.ecp-sidebar-card--secondary:hover {
+  opacity: 1;
+}

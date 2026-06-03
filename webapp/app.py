@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from . import bridge_runner, info_views, mock_events
 from .event_bus import bus
-from .scenarios import list_scenarios, resolve_prompt, get_scenario, get_default_filters
+from .scenarios import list_scenarios, resolve_prompt, get_scenario, get_default_filters, is_pending
 
 
 BASE_DIR = Path(__file__).parent
@@ -177,6 +177,14 @@ async def api_run(payload: RunRequest):
     scenario = get_scenario(payload.scenario_id)
     if not scenario:
         raise HTTPException(404, f"scenario_id desconocido: {payload.scenario_id}")
+
+    # Pending de EAPPS: rechazar con 400 explicativo
+    if is_pending(payload.scenario_id):
+        raise HTTPException(
+            400,
+            f"Este escenario esta esperando datos de EAPPS y no se puede "
+            f"ejecutar todavia. Razon: {scenario.get('pending_eapps_reason', 'pendiente')}",
+        )
 
     # Modo mock: forzado por env var (FORCE_MOCK=1) o solicitado en el request
     use_mock = payload.mock or _force_mock()

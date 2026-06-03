@@ -57,11 +57,14 @@
     <aside class="ecp-sidebar" id="sidebar">
       <div class="ecp-sidebar__title">Escenarios</div>
       <div class="ecp-sidebar__list" id="cardsGrid">
-        {% for s in scenarios %}
-        <article class="ecp-sidebar-card {{ s.card_class }}"
+        {# PRIMARY — 6 cards principales con datos reales #}
+        {% for s in scenarios if s.tier == 'primary' %}
+        <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--{{ s.tier }}"
                  data-scenario-id="{{ s.id }}"
                  data-renderer="{{ s.renderer }}"
                  data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                 data-free-text-label="{{ s.free_text_label }}"
+                 data-free-text-placeholder="{{ s.free_text_placeholder }}"
                  data-accepts-filters="{{ s.accepts_filters | join(',') }}"
                  title="{{ s.pain_point }}">
           <div class="ecp-sidebar-card__spinner"></div>
@@ -69,22 +72,54 @@
           <div class="ecp-sidebar-card__body">
             <div class="ecp-sidebar-card__title">{{ s.title }}</div>
             <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-            {% if s.id == 'brute-force' %}
-            <div class="ecp-sidebar-card__inline-filter" data-stop-click="true">
-              <label for="filterThreshold">Umbral:</label>
-              <select id="filterThreshold">
-                <option value="3">3 intentos</option>
-                <option value="5" selected>5 intentos</option>
-                <option value="10">10 intentos</option>
-                <option value="20">20 intentos</option>
-              </select>
-            </div>
-            {% elif s.accepts_filters %}
+            {% if s.accepts_filters %}
             <span class="ecp-sidebar-card__filters-flag">filtros: {{ s.accepts_filters | join(' + ') }}</span>
             {% endif %}
           </div>
         </article>
         {% endfor %}
+
+        {# PENDING — 3 cards disabled mientras EAPPS resuelve #}
+        {% set pending_scenarios = scenarios | selectattr('tier', 'equalto', 'pending') | list %}
+        {% if pending_scenarios %}
+        <div class="ecp-sidebar__subtitle">⏳ Esperando EAPPS</div>
+        {% for s in pending_scenarios %}
+        <article class="ecp-sidebar-card ecp-sidebar-card--pending"
+                 data-scenario-id="{{ s.id }}"
+                 data-tier="pending"
+                 title="Esperando EAPPS: {{ s.pending_eapps_reason }}">
+          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+            <span class="ecp-sidebar-card__pending-badge">⏳ Esperando dato EAPPS</span>
+          </div>
+        </article>
+        {% endfor %}
+        {% endif %}
+
+        {# SECONDARY — diagnostico granular + free-text libre #}
+        {% set secondary_scenarios = scenarios | selectattr('tier', 'equalto', 'secondary') | list %}
+        {% if secondary_scenarios %}
+        <div class="ecp-sidebar__subtitle">Utilitarios</div>
+        {% for s in secondary_scenarios %}
+        <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--secondary"
+                 data-scenario-id="{{ s.id }}"
+                 data-renderer="{{ s.renderer }}"
+                 data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                 data-free-text-label="{{ s.free_text_label }}"
+                 data-free-text-placeholder="{{ s.free_text_placeholder }}"
+                 data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                 title="{{ s.pain_point }}">
+          <div class="ecp-sidebar-card__spinner"></div>
+          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+          </div>
+        </article>
+        {% endfor %}
+        {% endif %}
       </div>
 
       <div class="ecp-sidebar__title ecp-sidebar__title--info">Información del Sistema</div>

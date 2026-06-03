@@ -274,12 +274,48 @@ _FREE_TEXT = [
     (0.3, {"type": "done"}),
 ]
 
+# Mock simple para correlation-trace (free-text con UUID)
+_CORRELATION = [
+    (0.0, {"type": "agent.received", "question": "Investigar correlation_id"}),
+    (0.2, {"type": "agent.hop", "hop": 1}),
+    (0.3, {"type": "tool.call", "hop": 1, "tool": "file_search",
+           "args": {"query": "patron 3 trazabilidad correlation_id"}}),
+    (0.5, {"type": "tool.call", "hop": 1, "tool": "query_log_analytics",
+           "args": {"query": "ContainerInstanceLog_CL | where ... correlation_id == '8f660c47-...'"}}),
+    (1.0, {"type": "tool.kql.done", "hop": 1, "rows": 12, "elapsed_seconds": 1.2}),
+    (1.2, {"type": "agent.final",
+           "text": ("### Hallazgo\n"
+                    "Reconstrui 12 eventos para correlation_id 8f660c47.\n"
+                    "Entrada: POST /api/vacaciones a las 10:32:18.\n"
+                    "Fallo en el paso 7 con TLNT-014 (VACACIONES_NO_ENCONTRADAS).\n"
+                    "\n(Mock — en modo real consulta KQL patron 3 contra LA)")}),
+    (0.2, {"type": "done"}),
+]
+
+# Mock simple para tlnt-lookup (free-text con codigo TLNT)
+_TLNT_LOOKUP = [
+    (0.0, {"type": "agent.received", "question": "Consultar codigo TLNT"}),
+    (0.2, {"type": "agent.hop", "hop": 1}),
+    (0.3, {"type": "tool.call", "hop": 1, "tool": "file_search",
+           "args": {"query": "TLNT-007 ERROR_VALIDACION"}}),
+    (0.6, {"type": "agent.final",
+           "text": ("### TLNT-007 — ERROR_VALIDACION\n"
+                    "**Descripcion:** Error inesperado en validacion (excepcion no controlada).\n"
+                    "**Modulo:** Cualquier validacion.\n"
+                    "**Solucion para usuario:** Reporte al soporte.\n"
+                    "**Accion soporte:** Buscar correlation_id en logs para stack trace. Severidad ERROR.\n"
+                    "\n(Mock — en modo real cita textualmente desde knowledge base)")}),
+    (0.2, {"type": "done"}),
+]
+
 MOCK_SEQUENCES = {
     "system-status": _SNAPSHOT,
     "errors-production": _ERRORS,
     "sox-audit": _SOX,
     "brute-force": _BRUTE_FORCE,
     "payroll-slow": _PAYROLL_SLOW,
+    "correlation-trace": _CORRELATION,
+    "tlnt-lookup": _TLNT_LOOKUP,
     "free-text": _FREE_TEXT,
 }
 
