@@ -204,9 +204,27 @@
       el.modalInput.focus();
       return;
     }
+    // Guards defensivos — si por alguna razon el state no se seteo correctamente
+    // al abrir el modal, mostrar un mensaje visible en lugar de TypeError silenciosa
+    if (!state._pendingCard || !state._pendingSid) {
+      alert('Estado interno inconsistente: no se identifico el escenario al abrir el modal. '
+            + 'Cierra el modal con la X y vuelve a clickear la card del escenario.');
+      console.error('Modal Run sin _pendingCard/_pendingSid', {
+        card: state._pendingCard,
+        sid: state._pendingSid,
+        renderer: state._pendingRenderer,
+      });
+      return;
+    }
     const filters = state._pendingFilters || {};
+    const card = state._pendingCard;
+    const sid = state._pendingSid;
+    const renderer = state._pendingRenderer;
     closeFreeTextModal();
-    runScenario(state._pendingCard, state._pendingSid, state._pendingRenderer, txt, filters);
+    runScenario(card, sid, renderer, txt, filters).catch(err => {
+      console.error('runScenario crashed:', err);
+      alert('Error al ejecutar: ' + (err && err.message ? err.message : err));
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -225,8 +243,15 @@
     state.awxUrl = null;
     state.artifacts = {};
 
-    // Cambiar layout: ocultar welcome, mostrar run banner + timeline
+    // Cambiar layout: ocultar welcome y CUALQUIER info view abierta previa,
+    // mostrar run banner + timeline. (Sin esto, si el usuario vio antes una
+    // vista de Informacion del Sistema, esa view cubre el run en marcha.)
     el.welcome.style.display = 'none';
+    if (el.infoView) {
+      el.infoView.style.display = 'none';
+      document.querySelectorAll('.ecp-sidebar-card--info').forEach(c =>
+        c.classList.remove('is-active'));
+    }
     el.runBanner.style.display = 'flex';
     el.timelineWrap.style.display = 'block';
     el.resultWrap.style.display = 'none'; // se muestra cuando llega agent.final
