@@ -1,0 +1,38 @@
+---
+# Role teams_card — POSTea una Adaptive Card al webhook de Teams configurado.
+#
+# Parametros esperados (el caller debe definirlos):
+#   tc_title:        string — titulo del header
+#   tc_subtitle:     string — subtitulo / contexto (opcional)
+#   tc_severity:     "HIGH" | "MEDIUM" | "LOW" | "INFO" | "OK"
+#   tc_facts:        list de {title, value} — bloque FactSet superior
+#   tc_sections:     list de {heading, items: list of markdown lines} — secciones
+#   tc_actions:      list de {title, url} — botones Action.OpenUrl (opcional)
+#   teams_webhook_url: URL (heredado del playbook)
+#
+# El template adaptive_card.json.j2 resuelve estilos por severidad.
+
+- name: "Enviar adaptive card a Teams: {{ tc_title }}"
+  ansible.builtin.uri:
+    url: "{{ teams_webhook_url }}"
+    method: POST
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body: "{{ lookup('template', 'adaptive_card.json.j2') | from_json }}"
+    status_code: [200, 202]
+    timeout: 15
+  register: tc_response
+  retries: 3
+  delay: 3
+  until: tc_response.status in [200, 202]
+  when: teams_webhook_url is defined and teams_webhook_url | length > 0
+  ignore_errors: true
+
+- name: "Reportar resultado notificacion Teams ({{ tc_title }})"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '✓ Adaptive card enviada (HTTP ' + (tc_response.status | string) + ').'
+         if (tc_response.status | default(0)) in [200, 202]
+         else '⚠ Fallo notificacion Teams (status ' + (tc_response.status | default('-1') | string) + ').' }}

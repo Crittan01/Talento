@@ -1,0 +1,120 @@
+{%- set sev = (tc_severity | default('INFO')) | upper -%}
+{%- set sev_map = {
+  'HIGH':   {'emoji':'🔴', 'style':'attention', 'badge_text':'HIGH'},
+  'MEDIUM': {'emoji':'🟠', 'style':'warning',   'badge_text':'MEDIUM'},
+  'LOW':    {'emoji':'🟡', 'style':'default',   'badge_text':'LOW'},
+  'OK':     {'emoji':'🟢', 'style':'good',      'badge_text':'OK'},
+  'INFO':   {'emoji':'🔵', 'style':'default',   'badge_text':'INFO'}
+} -%}
+{%- set sev_cfg = sev_map.get(sev, sev_map['INFO']) -%}
+{
+  "type": "message",
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [
+          {
+            "type": "Container",
+            "style": "{{ sev_cfg.style }}",
+            "bleed": true,
+            "items": [
+              {
+                "type": "ColumnSet",
+                "columns": [
+                  {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                      {
+                        "type": "TextBlock",
+                        "text": "{{ sev_cfg.emoji }} {{ tc_title | replace('\"','\\\"') }}",
+                        "weight": "Bolder",
+                        "size": "Large",
+                        "wrap": true
+                      }
+                      {%- if tc_subtitle is defined and tc_subtitle %},
+                      {
+                        "type": "TextBlock",
+                        "text": "{{ tc_subtitle | replace('\"','\\\"') }}",
+                        "isSubtle": true,
+                        "wrap": true,
+                        "spacing": "Small"
+                      }
+                      {%- endif %}
+                    ]
+                  },
+                  {
+                    "type": "Column",
+                    "width": "auto",
+                    "items": [
+                      {
+                        "type": "TextBlock",
+                        "text": "{{ sev_cfg.badge_text }}",
+                        "weight": "Bolder",
+                        "color": "{% if sev == 'HIGH' %}Attention{% elif sev == 'MEDIUM' %}Warning{% elif sev == 'OK' %}Good{% else %}Default{% endif %}",
+                        "horizontalAlignment": "Right"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          {%- if tc_facts is defined and tc_facts %},
+          {
+            "type": "FactSet",
+            "facts": [
+              {%- for f in tc_facts %}
+              {"title": "{{ f.title | replace('"','\\\"') }}", "value": "{{ f.value | string | replace('"','\\\"') }}"}{% if not loop.last %},{% endif %}
+              {%- endfor %}
+            ],
+            "spacing": "Medium"
+          }
+          {%- endif %}
+          {%- if tc_sections is defined and tc_sections %}
+          {%- for sec in tc_sections %},
+          {
+            "type": "TextBlock",
+            "text": "**{{ sec.heading | replace('"','\\\"') }}**",
+            "weight": "Bolder",
+            "wrap": true,
+            "spacing": "Medium",
+            "separator": true
+          }
+          {%- if sec.items %},
+          {
+            "type": "TextBlock",
+            "text": "{{ sec.items | map('replace', '"', '\\\"') | map('replace', '\n', ' ') | join('\\n\\n') }}",
+            "wrap": true,
+            "spacing": "Small"
+          }
+          {%- else %},
+          {
+            "type": "TextBlock",
+            "text": "_Sin elementos en la ventana._",
+            "isSubtle": true,
+            "wrap": true
+          }
+          {%- endif %}
+          {%- endfor %}
+          {%- endif %}
+        ]
+        {%- if tc_actions is defined and tc_actions %},
+        "actions": [
+          {%- for a in tc_actions %}
+          {
+            "type": "Action.OpenUrl",
+            "title": "{{ a.title | replace('"','\\\"') }}",
+            "url": "{{ a.url | replace('"','\\\"') }}"
+          }{% if not loop.last %},{% endif %}
+          {%- endfor %}
+        ]
+        {%- endif %}
+      }
+    }
+  ]
+}

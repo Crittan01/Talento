@@ -1,0 +1,65 @@
+---
+# Catalogo TLNT — fuente unica de verdad para playbooks (uso via include_vars)
+# y para el bridge Python (uso via yaml.safe_load).
+# Cada codigo tiene: title (corto), description (full), severity (tipica).
+tlnt_catalog:
+  TLNT-001:
+    title: "USUARIO_NO_ENCONTRADO"
+    description: "Usuario no encontrado en el directorio."
+    severity: "WARN"
+  TLNT-002:
+    title: "CREDENCIALES_INVALIDAS"
+    description: "Credenciales incorrectas ingresadas por el usuario."
+    severity: "WARN"
+  TLNT-003:
+    title: "TOKEN_NO_PROVISTO"
+    description: "Token de autenticacion no presente en la peticion."
+    severity: "WARN"
+  TLNT-004:
+    title: "VALIDACION_ENTRADA"
+    description: "Error de validacion de entrada en el controller."
+    severity: "WARN"
+  TLNT-005:
+    title: "OPERACION_NO_PERMITIDA"
+    description: "Operacion no permitida para el rol actual."
+    severity: "WARN"
+  TLNT-006:
+    title: "REGISTRO_DUPLICADO"
+    description: "Intento de crear un registro que ya existe."
+    severity: "WARN"
+  TLNT-007:
+    title: "RECURSO_NO_ENCONTRADO"
+    description: "Recurso solicitado no existe en la base."
+    severity: "WARN"
+  TLNT-008:
+    title: "PASSWORD_INCORRECTA"
+    description: "Contrasena incorrecta. Multiples intentos pueden indicar brute force."
+    severity: "WARN"
+  TLNT-009:
+    title: "USUARIO_BLOQUEADO"
+    description: "Cuenta de usuario bloqueada por exceso de intentos fallidos."
+    severity: "WARN"
+  TLNT-010:
+    title: "SESION_EXPIRADA"
+    description: "Sesion del usuario ha expirado."
+    severity: "INFO"
+  TLNT-011:
+    title: "INTENTOS_EXCEDIDOS"
+    description: "Numero maximo de intentos de autenticacion excedido."
+    severity: "WARN"
+  TLNT-012:
+    title: "CALAMIDAD_NO_ENCONTRADA"
+    description: "Calamidad no encontrada por el identificador dado."
+    severity: "WARN"
+  TLNT-013:
+    title: "INCAPACIDAD_NO_ENCONTRADA"
+    description: "Incapacidad no encontrada por el ID."
+    severity: "WARN"
+  TLNT-014:
+    title: "VACACIONES_NO_ENCONTRADAS"
+    description: "Registro de vacaciones no encontrado."
+    severity: "WARN"
+  TLNT-015:
+    title: "ERROR_INTEGRACION_BD"
+    description: "Error de integracion con la base de datos."
+    severity: "ERROR"

@@ -164,7 +164,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v17-lenguaje-neutro"  # v17: scrub de jerga interna en strings cliente-visibles (system_instructions, tool descriptions, scenarios prompts, emit source del timeline). "ambiente reconstruido" / "ACI 2" / "schema enriquecido" / "runtime" -> "TALENTO" / "actividad reciente" / "sistema de monitoreo". Regla nueva en system prompt para que el LLM NO mencione runtime/ACI/workspace/etc en su sintesis, use lenguaje de negocio. Mantengo intactos comentarios `#` Python y CATALOG_VERSION (metadato interno)
+CATALOG_VERSION = "v18-cards-mejoradas"  # v18: cards Teams enriquecidas. (1) vars/tlnt_catalog.yml comun (15 codigos con title+description+severity). (2) roles/teams_card con template Jinja parametrizado (header con badge severidad, FactSet, secciones, Action.OpenUrl). (3) errors-analysis refactor para usar role + resolver TLNT del top messages contra catalogo. (4) Helper notify_teams_finding() en bridge con construccion JSON Adaptive Card directa. (5) Auto-trigger desde lookup_runtime_logs: user_audit -> card por usuario con risk_score (errores/total %), modulos, codigos con def, sample correlation_ids + link al dashboard; brute_force -> card con usuarios sospechosos, badge severidad del aggregator, velocidad de ataque (fails/seg) + link. Cero refactor de sox-audit.yml/brute-force-detector.yml (no se invocan via dashboard, mantienen su card AWX original)
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -568,6 +568,182 @@ def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: 
         sospechosos.sort(key=lambda x: x["fails"], reverse=True)
         return {"rows": len(sospechosos), "data": sospechosos[:20]}
     return {"error": f"modo desconocido: {mode}", "data": []}
+
+
+# ============================================================================
+# Notificacion Teams centralizada (Sprint 2 — para los scenarios runtime que
+# NO pasan por AWX y por tanto no disparan tarea del playbook).
+# El catalogo TLNT vive en vars/tlnt_catalog.yml (compartido con playbooks).
+# ============================================================================
+_TLNT_CATALOG_CACHE = None
+
+
+def _load_tlnt_catalog() -> dict:
+    """Carga el catalogo TLNT desde vars/tlnt_catalog.yml. Cached por proceso."""
+    global _TLNT_CATALOG_CACHE
+    if _TLNT_CATALOG_CACHE is not None:
+        return _TLNT_CATALOG_CACHE
+    catalog = {}
+    try:
+        catalog_path = Path(__file__).parent.parent / "vars" / "tlnt_catalog.yml"
+        if catalog_path.exists():
+            # Parser YAML minimo (sin dep externa) — suficiente para el formato del archivo.
+            current_code = None
+            for raw in catalog_path.read_text(encoding="utf-8").splitlines():
+                line = raw.rstrip()
+                if not line or line.lstrip().startswith("#"):
+                    continue
+                if line.startswith("  TLNT-"):
+                    current_code = line.strip().rstrip(":")
+                    catalog[current_code] = {}
+                elif current_code and line.startswith("    "):
+                    if ":" in line:
+                        k, v = line.strip().split(":", 1)
+                        catalog[current_code][k.strip()] = v.strip().strip('"').strip("'")
+    except Exception as exc:
+        print(f"[notify_teams] no se pudo cargar catalogo TLNT: {exc}")
+    _TLNT_CATALOG_CACHE = catalog
+    return catalog
+
+
+def _severity_card_style(sev: str) -> dict:
+    """Mapeo severidad -> emoji + style + color para el badge."""
+    sev = (sev or "INFO").upper()
+    table = {
+        "HIGH":   {"emoji": "🔴", "style": "attention", "color": "Attention"},
+        "MEDIUM": {"emoji": "🟠", "style": "warning",   "color": "Warning"},
+        "LOW":    {"emoji": "🟡", "style": "default",   "color": "Default"},
+        "OK":     {"emoji": "🟢", "style": "good",      "color": "Good"},
+        "INFO":   {"emoji": "🔵", "style": "default",   "color": "Default"},
+    }
+    return table.get(sev, table["INFO"])
+
+
+def notify_teams_finding(
+    title: str,
+    subtitle: str = "",
+    severity: str = "INFO",
+    facts: Optional[list] = None,
+    sections: Optional[list] = None,
+    actions: Optional[list] = None,
+) -> dict:
+    """POSTea una Adaptive Card al webhook Teams configurado en .env.
+    Parametros:
+      title:    string header (ej "TALENTO SOX Audit — Usuario nvivas")
+      subtitle: contexto secundario (ej "Risk score 21.6% · ventana 3h")
+      severity: HIGH | MEDIUM | LOW | OK | INFO
+      facts:    [{"title":..., "value":...}] para FactSet superior
+      sections: [{"heading":..., "items":[lineas markdown]}] secciones
+      actions:  [{"title":..., "url":...}] botones Action.OpenUrl
+    Devuelve dict con status_code y elapsed. Si no hay webhook configurado o
+    si falla, deja log pero no rompe el flow del agente (return {"skipped": ...}).
+    """
+    webhook = ENV.get("TEAMS_WEBHOOK_URL", "").strip()
+    if not webhook:
+        return {"skipped": "TEAMS_WEBHOOK_URL no configurado"}
+    cfg = _severity_card_style(severity)
+    body = [
+        {
+            "type": "Container",
+            "style": cfg["style"],
+            "bleed": True,
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "columns": [
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"{cfg['emoji']} {title}",
+                                    "weight": "Bolder",
+                                    "size": "Large",
+                                    "wrap": True,
+                                },
+                            ] + (
+                                [{
+                                    "type": "TextBlock",
+                                    "text": subtitle,
+                                    "isSubtle": True,
+                                    "wrap": True,
+                                    "spacing": "Small",
+                                }] if subtitle else []
+                            ),
+                        },
+                        {
+                            "type": "Column",
+                            "width": "auto",
+                            "items": [{
+                                "type": "TextBlock",
+                                "text": (severity or "INFO").upper(),
+                                "weight": "Bolder",
+                                "color": cfg["color"],
+                                "horizontalAlignment": "Right",
+                            }],
+                        },
+                    ],
+                },
+            ],
+        },
+    ]
+    if facts:
+        body.append({
+            "type": "FactSet",
+            "facts": [{"title": str(f.get("title", "")), "value": str(f.get("value", ""))} for f in facts],
+            "spacing": "Medium",
+        })
+    for sec in (sections or []):
+        body.append({
+            "type": "TextBlock",
+            "text": f"**{sec.get('heading','')}**",
+            "weight": "Bolder",
+            "wrap": True,
+            "spacing": "Medium",
+            "separator": True,
+        })
+        items = sec.get("items") or []
+        if items:
+            body.append({
+                "type": "TextBlock",
+                "text": "\n\n".join(str(i) for i in items),
+                "wrap": True,
+                "spacing": "Small",
+            })
+        else:
+            body.append({
+                "type": "TextBlock",
+                "text": "_Sin elementos en la ventana._",
+                "isSubtle": True,
+                "wrap": True,
+            })
+    card = {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": body,
+            },
+        }],
+    }
+    if actions:
+        card["attachments"][0]["content"]["actions"] = [
+            {"type": "Action.OpenUrl", "title": str(a.get("title", "Abrir")), "url": str(a.get("url", ""))}
+            for a in actions if a.get("url")
+        ]
+    t0 = time.time()
+    try:
+        resp = requests.post(webhook, json=card, timeout=15, verify=False)
+        elapsed = time.time() - t0
+        ok = resp.status_code in (200, 202)
+        return {"status_code": resp.status_code, "elapsed_seconds": round(elapsed, 2), "ok": ok}
+    except Exception as exc:
+        elapsed = time.time() - t0
+        return {"error": str(exc), "elapsed_seconds": round(elapsed, 2), "ok": False}
 
 
 def execute_kql(query: str) -> dict:
@@ -1407,6 +1583,102 @@ def process_response_items(
                         "buffer_lineas": result.get("_buffer_lineas", 0),
                         "elapsed_seconds": round(elapsed, 1),
                     })
+                    # ============================================================
+                    # Auto-notificar Teams en hallazgos relevantes (Sprint 2).
+                    # Modos cubiertos: user_audit con actividad significativa,
+                    # brute_force con sospechosos. Cards enriquecidas con
+                    # catalogo TLNT, badge severidad, Action.OpenUrl al dashboard.
+                    # ============================================================
+                    try:
+                        rows = result.get("rows", 0) or 0
+                        data = result.get("data") or []
+                        if modo == "user_audit" and rows >= 1 and data:
+                            d = data[0]
+                            total = int(d.get("total_eventos", 0))
+                            errs = int(d.get("errores", 0))
+                            warns = int(d.get("warns", 0))
+                            risk_pct = round((errs / total) * 100, 1) if total else 0.0
+                            sev = "HIGH" if risk_pct >= 20 else ("MEDIUM" if risk_pct >= 10 else "LOW")
+                            catalog = _load_tlnt_catalog()
+                            codigos = [c for c in (d.get("codigos_vistos") or []) if c]
+                            codigos_lines = []
+                            for c in codigos[:8]:
+                                if c in catalog:
+                                    codigos_lines.append(f"• `{c}` {catalog[c].get('title','')} — {catalog[c].get('description','')}")
+                                else:
+                                    codigos_lines.append(f"• `{c}`")
+                            loggers = d.get("loggers") or []
+                            loggers_compact = ", ".join(loggers[:6]) if loggers else "n/a"
+                            sample = d.get("sample_ultimos_eventos") or []
+                            cids_lines = []
+                            for s in sample[:3]:
+                                cid = s.get("correlation_id", "")[:36]
+                                code = s.get("error_code") or "—"
+                                if cid:
+                                    cids_lines.append(f"• `{cid[:8]}…{cid[-4:]}` ({code})")
+                            notify_teams_finding(
+                                title=f"TALENTO SOX Audit — Usuario {usr}",
+                                subtitle=f"Risk score {risk_pct}% ({errs} err / {total} eventos) · ventana ~3h",
+                                severity=sev,
+                                facts=[
+                                    {"title": "Total eventos", "value": str(total)},
+                                    {"title": "Errores",       "value": str(errs)},
+                                    {"title": "Warnings",      "value": str(warns)},
+                                    {"title": "Modulos tocados","value": str(len(loggers))},
+                                ],
+                                sections=[
+                                    {"heading": "Codigos TLNT detectados (con definicion)",
+                                     "items": codigos_lines or ["_sin codigos en la ventana_"]},
+                                    {"heading": "Modulos accedidos",
+                                     "items": [loggers_compact]},
+                                    {"heading": "Sample correlation_ids para drill-down",
+                                     "items": cids_lines or ["_sin correlation_ids capturados en sample_"]},
+                                ],
+                                actions=[
+                                    {"title": "Ver actividad en dashboard",
+                                     "url": f"http://localhost:8000/?scenario=user-activity&user={usr}"},
+                                ],
+                            )
+                        elif modo == "brute_force" and rows >= 1 and data:
+                            top = data[0]
+                            top_sev = (top.get("severidad") or "LOW").upper()
+                            users_lines = []
+                            for u in data[:5]:
+                                fails = int(u.get("fails", 0))
+                                codes = ", ".join(u.get("codigos") or [])
+                                users_lines.append(f"• **{u.get('usuario','?')}** — {fails} intentos `{codes}` (severidad {u.get('severidad','?')})")
+                            # Velocidad de ataque del primer sospechoso
+                            import datetime
+                            vel_line = []
+                            try:
+                                p = datetime.datetime.fromisoformat(top.get("primera","").replace("Z","+00:00"))
+                                u_ts = datetime.datetime.fromisoformat(top.get("ultima","").replace("Z","+00:00"))
+                                dur = (u_ts - p).total_seconds() or 1
+                                vel_line.append(f"Velocidad: {round(int(top.get('fails',0))/dur, 1)} intentos/seg ({top.get('usuario')})")
+                            except Exception:
+                                pass
+                            notify_teams_finding(
+                                title="TALENTO — Deteccion de fuerza bruta",
+                                subtitle=f"{rows} usuario(s) sobre umbral · ventana ~3h",
+                                severity=top_sev,
+                                facts=[
+                                    {"title": "Usuarios sospechosos", "value": str(rows)},
+                                    {"title": "Top severidad", "value": top_sev},
+                                    {"title": "Top intentos", "value": str(top.get("fails", "?"))},
+                                ],
+                                sections=[
+                                    {"heading": "Usuarios sobre umbral",
+                                     "items": users_lines},
+                                    {"heading": "Indicadores adicionales",
+                                     "items": vel_line or ["_sin metricas adicionales_"]},
+                                ],
+                                actions=[
+                                    {"title": "Ver detalle en dashboard",
+                                     "url": "http://localhost:8000/?scenario=brute-force"},
+                                ],
+                            )
+                    except Exception as exc:
+                        print(f"     ⚠ notify_teams_finding fallo (no rompe el flow): {exc}")
                 payload = json.dumps(result, ensure_ascii=False)
                 if len(payload) > _MAX_KQL_OUTPUT_CHARS:
                     payload = json.dumps({

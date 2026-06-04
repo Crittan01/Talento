@@ -173,74 +173,49 @@
           - "Top mensajes (count, snippet):"
           - "{{ top_messages_query.json.tables[0].rows | default([]) }}"
 
-    - name: Notificar via adaptive card en Teams
-      ansible.builtin.uri:
-        url: "{{ teams_webhook_url }}"
-        method: POST
-        validate_certs: no
-        headers:
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          type: message
-          attachments:
-            - contentType: "application/vnd.microsoft.card.adaptive"
-              content:
-                $schema: "http://adaptivecards.io/schemas/adaptive-card.json"
-                type: AdaptiveCard
-                version: "1.4"
-                body:
-                  - type: Container
-                    style: "{{ card_color }}"
-                    items:
-                      - type: TextBlock
-                        text: "{{ '🚨' if severity_status == 'CRITICAL' else ('⚠️' if severity_status == 'WARN' else '✅') }} TALENTO Errors & Warnings"
-                        weight: Bolder
-                        size: Large
-                      - type: TextBlock
-                        text: "Estado: {{ severity_status }} | Rango: últimas {{ time_range_hours }}h"
-                        isSubtle: true
-                        spacing: None
-                  - type: FactSet
-                    facts:
-                      - title: "Errores"
-                        value: "{{ total_errors }}"
-                      - title: "Warnings"
-                        value: "{{ total_warnings }}"
-                      - title: "Containers afectados"
-                        value: "{{ containers_query.json.tables[0].rows | default([]) | length }}"
-                      - title: "Total eventos críticos"
-                        value: "{{ (total_errors | int) + (total_warnings | int) }}"
-                  - type: TextBlock
-                    text: "Top 5 mensajes más frecuentes"
-                    weight: Bolder
-                    spacing: Medium
-                  - type: TextBlock
-                    text: "{% for row in top_messages_query.json.tables[0].rows | default([]) %}**{{ row[1] }}×** — {{ row[0] | truncate(150, true, '…') | replace('\n',' ') }}\n\n{% endfor %}{% if (top_messages_query.json.tables[0].rows | default([])) | length == 0 %}_No se encontraron errores ni warnings en el rango analizado._{% endif %}"
-                    wrap: true
-                  - type: TextBlock
-                    text: "Containers con problemas"
-                    weight: Bolder
-                    spacing: Medium
-                  - type: TextBlock
-                    text: "{% for row in containers_query.json.tables[0].rows | default([]) %}• **{{ row[0] }}**: {{ row[1] }} eventos\n{% endfor %}{% if (containers_query.json.tables[0].rows | default([])) | length == 0 %}_Ningún container con problemas en el rango._{% endif %}"
-                    wrap: true
-        status_code: [200, 202]
-        timeout: 15
-      when: teams_webhook_url | length > 0
-      register: teams_notification
-      retries: 3
-      delay: 3
-      until: teams_notification.status | default(-1) in [200, 202]
-      ignore_errors: true
+    - name: "Cargar catalogo TLNT para enriquecer la card"
+      ansible.builtin.include_vars: "{{ playbook_dir }}/../vars/tlnt_catalog.yml"
 
-    - name: Reportar resultado notificación Teams
-      ansible.builtin.debug:
-        msg: >-
-          {% if teams_webhook_url | length == 0 %}
-          Teams webhook no configurado — skip notificación.
-          {% elif teams_notification.status | default(0) in [200, 202] %}
-          ✓ Adaptive card enviada (HTTP {{ teams_notification.status }}).
-          {% else %}
-          ⚠ Fallo notificación Teams (status {{ teams_notification.status | default('?') }}).
-          {% endif %}
+    - name: "Extraer codigos TLNT del top messages y mapear contra catalogo"
+      ansible.builtin.set_fact:
+        tlnt_lines: >-
+          {%- set out = [] -%}
+          {%- for row in top_messages_query.json.tables[0].rows | default([]) -%}
+            {%- set msg = row[0] -%}
+            {%- set count = row[1] -%}
+            {%- set codigo = msg | regex_search('TLNT-[0-9]+') -%}
+            {%- if codigo and codigo in tlnt_catalog -%}
+              {%- set defn = tlnt_catalog[codigo] -%}
+              {%- set _ = out.append('**' + (count | string) + '×** `' + codigo + '` ' + defn.title + ' — ' + defn.description) -%}
+            {%- else -%}
+              {%- set _ = out.append('**' + (count | string) + '×** ' + (msg | truncate(140, true, '…') | replace('\n',' '))) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: "Notificar via adaptive card en Teams (con role)"
+      ansible.builtin.include_role:
+        name: teams_card
+      vars:
+        tc_title: "TALENTO — Errores recientes"
+        tc_subtitle: "Estado {{ severity_status }} · ventana ultimas {{ time_range_hours }}h"
+        tc_severity: >-
+          {{- 'HIGH' if severity_status == 'CRITICAL'
+              else ('MEDIUM' if severity_status == 'WARN' else 'OK') -}}
+        tc_facts:
+          - { title: "Errores",      value: "{{ total_errors }}" }
+          - { title: "Warnings",     value: "{{ total_warnings }}" }
+          - { title: "Containers",   value: "{{ containers_query.json.tables[0].rows | default([]) | length }}" }
+          - { title: "Eventos criticos total", value: "{{ (total_errors | int) + (total_warnings | int) }}" }
+        tc_sections:
+          - heading: "Top 5 mensajes con definicion TLNT"
+            items: "{{ tlnt_lines }}"
+          - heading: "Containers con problemas"
+            items: >-
+              {%- set rows = [] -%}
+              {%- for r in containers_query.json.tables[0].rows | default([]) -%}
+                {%- set _ = rows.append('• **' + r[0] + '** — ' + (r[1] | string) + ' eventos') -%}
+              {%- endfor -%}
+              {{ rows }}
+        tc_actions:
+          - { title: "Ver dashboard TALENTO", url: "http://localhost:8000" }
