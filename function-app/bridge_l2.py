@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v15-curacion-demo"  # v15: rediseno demo Ecopetrol. Tools especializadas consolidadas: tlnt_explorer (merge top + lookup) y user_activity (Plan C con coalesce(p.usuario, regex(message))). Removidas lookup_tlnt_code y top_codigos_error (absorbidas por tlnt_explorer). user_activity recupera ~2254 eventos/24h via regex sobre message. Scenarios curados: 7 primary (infra-health-check con scope, errors-production, correlation-trace, tlnt-explorer, user-activity, auto-remediate-restart, free-text) + 3 roadmap (sox-audit, brute-force, performance-analysis) con razones neutras sin mencionar "EAPPS" al cliente. UI scrubeada: "Capacidades en habilitacion" en lugar de "Esperando EAPPS"; "Estado del ambiente" en lugar de "Hallazgos EAPPS"; "equipo de plataforma" en lugar de "EAPPS"
+CATALOG_VERSION = "v16-runtime-bridge"  # v16: puente runtime al ACI 2 (lookup_runtime_logs). Helper fetch_aci_runtime_logs usa ContainerInstanceManagementClient con SP logssolution (Contributor en RG 2 ya asignado, 0 permisos adicionales). Aggregator en memoria con 4 modos: user_audit, top_users, top_codes, brute_force. Buffer ~2000 lineas / ~3h con JSON 100% parseable del schema enriquecido (campos `usuario`, `error_code`, `correlation_id` dedicados). Scenarios sox-audit + brute-force REACTIVADOS de pending->primary con prompts que llaman lookup_runtime_logs. user-activity sigue con Plan C (regex sobre workspace) para ventanas largas. system_instructions: REGLA DE FUENTE - "ambiente reconstruido/SOX/brute force/ultimas horas" -> runtime; "historico/dias/semanas" -> workspace. Solo queda performance-analysis en pending
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -405,6 +405,168 @@ def kql_tlnt_explorer(codigo_filtro: str, time_range_hours: int) -> str:
     )
 
 
+# ============================================================================
+# Runtime logs bridge (puente temporal al ACI 2 mientras EAPPS conecta el
+# pipeline diagnostics.logAnalytics). Lee directo del runtime via ARM
+# (containers.list_logs) — buffer de ~2000 lineas / ~3h de historia, JSON
+# 100% parseable con `usuario`, `error_code`, `correlation_id` como campos
+# dedicados del schema enriquecido del ambiente reconstruido.
+# ============================================================================
+_ACI_CLIENT_CACHE = {}
+
+
+def _get_aci_client():
+    """ContainerInstanceManagementClient autenticado con el SP del .env.
+    Cached por proceso para no reautenticar en cada call.
+    """
+    key = (ENV.get("AZURE_TENANT_ID"), ENV.get("AZURE_CLIENT_ID"), ENV.get("AZURE_SUBSCRIPTION_ID"))
+    if key not in _ACI_CLIENT_CACHE:
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.containerinstance import ContainerInstanceManagementClient
+        cred = ClientSecretCredential(
+            tenant_id=ENV["AZURE_TENANT_ID"],
+            client_id=ENV["AZURE_CLIENT_ID"],
+            client_secret=ENV["AZURE_CLIENT_SECRET"],
+        )
+        _ACI_CLIENT_CACHE[key] = ContainerInstanceManagementClient(
+            credential=cred,
+            subscription_id=ENV["AZURE_SUBSCRIPTION_ID"],
+        )
+    return _ACI_CLIENT_CACHE[key]
+
+
+def fetch_aci_runtime_logs(tail: int = 2000, since_minutes: Optional[int] = None) -> list:
+    """Recupera logs del runtime del ACI configurado en .env (ACI_NAME,
+    ACI_RESOURCE_GROUP). Devuelve lista de dicts ya parseados del JSON
+    estructurado. Lineas no-JSON se descartan.
+
+    - tail: maximo de lineas a pedir al runtime (ARM acepta hasta 2000).
+    - since_minutes: si se da, filtra eventos cuyo @timestamp sea posterior
+      a now - N minutos.
+    """
+    aci_name = ENV.get("ACI_NAME")
+    aci_rg = ENV.get("ACI_RESOURCE_GROUP")
+    if not aci_name or not aci_rg:
+        return [{"_error": "ACI_NAME / ACI_RESOURCE_GROUP no configurados en .env"}]
+    client = _get_aci_client()
+    tail = max(50, min(int(tail or 2000), 2000))
+    # Descubrir el nombre interno del container (suele ser el mismo que el group).
+    try:
+        cg = client.container_groups.get(resource_group_name=aci_rg, container_group_name=aci_name)
+        container_internal = cg.containers[0].name if cg.containers else aci_name
+    except Exception as exc:
+        return [{"_error": f"container_groups.get fallo: {exc}"}]
+    try:
+        logs_resp = client.containers.list_logs(
+            resource_group_name=aci_rg,
+            container_group_name=aci_name,
+            container_name=container_internal,
+            tail=tail,
+        )
+        raw = logs_resp.content or ""
+    except Exception as exc:
+        return [{"_error": f"containers.list_logs fallo: {exc}"}]
+    records = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if since_minutes:
+        import datetime
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=int(since_minutes))
+        kept = []
+        for r in records:
+            ts = r.get("@timestamp", "")
+            try:
+                t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if t >= cutoff:
+                    kept.append(r)
+            except Exception:
+                kept.append(r)
+        records = kept
+    return records
+
+
+def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: str = "") -> dict:
+    """Agregaciones en memoria sobre los logs del runtime — no requiere KQL.
+    Modos:
+      - 'user_audit': para 1 usuario, resumen agregado.
+      - 'top_users': top N usuarios por frecuencia.
+      - 'top_codes': top N codigos TLNT por frecuencia.
+      - 'brute_force': agrupa fallos de auth por usuario, umbral >=3 fallos.
+    """
+    if records and isinstance(records[0], dict) and records[0].get("_error"):
+        return {"error": records[0]["_error"], "data": []}
+    from collections import Counter, defaultdict
+    AUTH_CODES = {"TLNT-002", "TLNT-008", "TLNT-009", "TLNT-011"}
+    if mode == "user_audit":
+        if not usuario:
+            return {"error": "user_audit requiere parametro 'usuario'", "data": []}
+        match = [r for r in records if str(r.get("usuario", "")).lower() == usuario.lower()]
+        if not match:
+            return {"rows": 0, "data": [], "_note": f"sin actividad de '{usuario}' en buffer (~3h)"}
+        levels = Counter(r.get("level", "?") for r in match)
+        codigos = sorted({r.get("error_code") for r in match if r.get("error_code")})
+        loggers = sorted({r.get("logger_name", "").split(".")[-1] for r in match if r.get("logger_name")})[:8]
+        timestamps = sorted([r.get("@timestamp", "") for r in match if r.get("@timestamp")])
+        sample = match[-3:]  # ultimos 3 eventos
+        return {
+            "rows": 1,
+            "data": [{
+                "usuario": usuario,
+                "total_eventos": len(match),
+                "errores": levels.get("ERROR", 0),
+                "warns": levels.get("WARN", 0),
+                "infos": levels.get("INFO", 0),
+                "codigos_vistos": codigos,
+                "loggers": loggers,
+                "primera_actividad": timestamps[0] if timestamps else None,
+                "ultima_actividad": timestamps[-1] if timestamps else None,
+                "sample_ultimos_eventos": [
+                    {k: v for k, v in s.items() if k in (
+                        "@timestamp", "level", "error_code", "correlation_id", "message"
+                    )} for s in sample
+                ],
+            }],
+        }
+    if mode == "top_users":
+        c = Counter(r.get("usuario") for r in records if r.get("usuario"))
+        data = [{"usuario": u, "eventos": n} for u, n in c.most_common(10)]
+        return {"rows": len(data), "data": data}
+    if mode == "top_codes":
+        c = Counter(r.get("error_code") for r in records if r.get("error_code"))
+        data = [{"codigo": code, "ocurrencias": n} for code, n in c.most_common(10)]
+        return {"rows": len(data), "data": data}
+    if mode == "brute_force":
+        # Agrupar fallos de auth por usuario
+        by_user = defaultdict(list)
+        for r in records:
+            code = r.get("error_code")
+            user = r.get("usuario")
+            if code in AUTH_CODES and user:
+                by_user[user].append(r)
+        threshold = 3
+        sospechosos = []
+        for u, evts in by_user.items():
+            if len(evts) >= threshold:
+                ts = sorted(e.get("@timestamp", "") for e in evts)
+                sospechosos.append({
+                    "usuario": u,
+                    "fails": len(evts),
+                    "codigos": sorted({e.get("error_code") for e in evts}),
+                    "primera": ts[0] if ts else None,
+                    "ultima": ts[-1] if ts else None,
+                    "severidad": "HIGH" if len(evts) >= 10 else ("MEDIUM" if len(evts) >= 5 else "LOW"),
+                })
+        sospechosos.sort(key=lambda x: x["fails"], reverse=True)
+        return {"rows": len(sospechosos), "data": sospechosos[:20]}
+    return {"error": f"modo desconocido: {mode}", "data": []}
+
+
 def execute_kql(query: str) -> dict:
     if "| take " not in query.lower() and "| top " not in query.lower():
         query = query.rstrip() + " | take 100"
@@ -627,14 +789,27 @@ def build_system_instructions() -> str:
         "    mesa de ayuda, auditoria agregada, o cuando el operador pregunta "
         "    por un codigo especifico.\n\n"
         "1c. user_activity(usuario, time_range_hours): resumen de actividad de "
-        "    un usuario (total eventos, errores, warns, codigos vistos, primera "
-        "    y ultima actividad). Plan hibrido: usa el campo `usuario` del JSON "
-        "    si esta poblado, o lo extrae via regex sobre `message`. Filtra "
-        "    placeholders ruidosos. USALA para auditoria SOX por usuario o "
-        "    investigacion forense.\n\n"
-        "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de las "
-        "    3 anteriores cubre el caso. Para correlation_id, codigos TLNT y "
-        "    actividad por usuario USA SIEMPRE la tool especializada.\n\n"
+        "    un usuario sobre el workspace de Log Analytics (recibe del "
+        "    ambiente productivo). Usa regex sobre `message` como fallback. "
+        "    Util cuando se requiere VENTANA LARGA (24-168h) pero sin schema "
+        "    enriquecido.\n\n"
+        "1d. lookup_runtime_logs(modo, usuario, minutos): PUENTE al runtime "
+        "    del ambiente reconstruido. Schema enriquecido (campos `usuario`, "
+        "    `error_code`, `correlation_id` ya estructurados). 4 modos: "
+        "    user_audit (con usuario), top_users, top_codes, brute_force. "
+        "    Buffer ~3h. PREFIRELA cuando el operador pida 'reciente', "
+        "    'ultimas horas', 'ahora mismo', auditoria SOX por usuario, o "
+        "    deteccion de brute force — los datos son del schema enriquecido "
+        "    y el campo usuario es dedicado, no extraido por regex.\n\n"
+        "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de "
+        "    las 4 anteriores cubre el caso. Para correlation_id, codigos TLNT, "
+        "    actividad por usuario y operaciones sobre el ambiente reconstruido "
+        "    USA SIEMPRE la tool especializada.\n\n"
+        "**REGLA DE FUENTE**: Si el operador pide datos del 'ambiente "
+        "reconstruido', 'esquema enriquecido', 'auditoria SOX por usuario', "
+        "'brute force' o 'ultimos minutos/horas' -> usa lookup_runtime_logs. "
+        "Si pide historico (mas de 3h, dias, semanas) -> usa user_activity / "
+        "tlnt_explorer / lookup_correlation_id sobre workspace.\n\n"
         "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
         "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
         "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
@@ -869,6 +1044,48 @@ TOOL_USER_ACTIVITY = FunctionTool(
     strict=True,
 )
 
+# Puente runtime logs ACI 2 — desbloquea SOX + Brute Force HOY con datos del
+# schema enriquecido (usuario, error_code como campos JSON dedicados), sin
+# esperar a que se conecte el pipeline diagnostics.logAnalytics al workspace.
+TOOL_RUNTIME_LOGS = FunctionTool(
+    name="lookup_runtime_logs",
+    description=(
+        "Consulta los logs DEL RUNTIME del ACI moderno (aci-centralecopetrol2) "
+        "via Azure ARM directamente. Buffer ~2000 lineas / ~3h de historia. "
+        "Trae JSON estructurado completo (`usuario`, `error_code`, "
+        "`correlation_id`, `level`, `logger_name`, `message`) — el schema "
+        "enriquecido del ambiente reconstruido. Tiene cuatro modos:\n"
+        "  - user_audit (requiere `usuario`): resumen agregado de actividad.\n"
+        "  - top_users: top 10 usernames por frecuencia.\n"
+        "  - top_codes: top 10 codigos TLNT por frecuencia.\n"
+        "  - brute_force: usuarios con >=3 fallos de auth (TLNT-002/008/009/011).\n"
+        "Usala para auditoria SOX, deteccion de brute force, o cualquier "
+        "consulta operativa sobre el ambiente reconstruido. La ventana es "
+        "limitada (~3h) — para histories mas largos esperar al pipeline al "
+        "workspace de Log Analytics."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "modo": {
+                "type": "string",
+                "description": "user_audit | top_users | top_codes | brute_force",
+            },
+            "usuario": {
+                "type": "string",
+                "description": "Username (requerido para modo user_audit, ignorado en otros). Cadena vacia si no aplica.",
+            },
+            "minutos": {
+                "type": "integer",
+                "description": "Filtrar a ultimos N minutos (default 180 = 3h buffer completo).",
+            },
+        },
+        "required": ["modo", "usuario", "minutos"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 def build_tool_run_awx() -> FunctionTool:
     """Tool spec con descripcion construida con los JT IDs activos."""
     j = JT_IDS
@@ -979,6 +1196,7 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_LOOKUP_CID,
         TOOL_TLNT_EXPLORER,
         TOOL_USER_ACTIVITY,
+        TOOL_RUNTIME_LOGS,
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -1144,6 +1362,59 @@ def process_response_items(
                     args_for_event={"usuario": usr, "time_range_hours": hrs},
                     query=query, emit=emit, call_id=item.call_id,
                 ))
+            elif item.name == "lookup_runtime_logs":
+                modo = args.get("modo", "top_users")
+                usr = args.get("usuario", "") or ""
+                minutos = int(args.get("minutos") or 180)
+                print(f"     RUNTIME[{modo}] usuario='{usr}' minutos={minutos}")
+                _emit(emit, {
+                    "type": "tool.call",
+                    "hop": hop,
+                    "tool": "lookup_runtime_logs",
+                    "args": {"modo": modo, "usuario": usr, "minutos": minutos},
+                })
+                _emit(emit, {
+                    "type": "tool.runtime.fetch",
+                    "hop": hop,
+                    "source": f"{ENV.get('ACI_NAME')} runtime buffer (~3h, schema enriquecido)",
+                })
+                t0 = time.time()
+                try:
+                    records = fetch_aci_runtime_logs(tail=2000, since_minutes=minutos)
+                    result = aggregate_runtime_logs(records, modo, usuario=usr)
+                    result["_modo"] = modo
+                    result["_buffer_lineas"] = len([r for r in records if isinstance(r, dict) and "_error" not in r])
+                except Exception as exc:
+                    result = {"error": str(exc), "data": []}
+                elapsed = time.time() - t0
+                if "error" in result:
+                    print(f"     ⚠️  RUNTIME ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {
+                        "type": "tool.runtime.error",
+                        "hop": hop,
+                        "error": result.get("error"),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
+                else:
+                    print(f"     ✓ RUNTIME OK ({elapsed:.1f}s): {result.get('rows', 0)} filas / {result.get('_buffer_lineas',0)} lineas en buffer")
+                    _emit(emit, {
+                        "type": "tool.runtime.done",
+                        "hop": hop,
+                        "rows": result.get("rows", 0),
+                        "buffer_lineas": result.get("_buffer_lineas", 0),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
+                payload = json.dumps(result, ensure_ascii=False)
+                if len(payload) > _MAX_KQL_OUTPUT_CHARS:
+                    payload = json.dumps({
+                        "rows": result.get("rows", 0),
+                        "_truncated": "payload runtime excedio limite; ajusta el modo o filtro de usuario",
+                    }, ensure_ascii=False)
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": payload,
+                })
             # ---- Escape hatch: query_log_analytics (query libre) ----
             elif item.name == "query_log_analytics":
                 kql = args.get("query", "")
