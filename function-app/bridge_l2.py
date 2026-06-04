@@ -164,7 +164,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v19-insights-classic-bridge"  # v19: (1) Bridge directo a Application Insights (modo Classic) — EAPPS tenia razon, AI esta activo pero su componente esta en Classic y no Workspace-based; queries van contra `requests`/`exceptions`/etc del componente, no `AppRequests`/`AppExceptions` del workspace. Tool nueva lookup_app_insights con 6 modos: top_endpoints, latency_p95, errors_5xx, slow_deps, top_exceptions, throughput. SDK azure-monitor-query con SP. (2) Scenario performance-analysis reactivado de pending->primary con la tool nueva. (3) Fix threshold brute-force: aggregator + tool schema + handler + scenario propagan failed_threshold del UI (default 5, min 2). 9/9 scenarios primary funcionando. Pendiente solo (futuro hardening): migrar AI a workspace-based
+CATALOG_VERSION = "v20-correlation-dual"  # v20: lookup_correlation_id auto-enruta por formato del UUID. (a) UUID con guiones (Spring Boot correlation_id): busca en workspace legacy via ContainerInstanceLog_CL JSON; si vacio, fallback al buffer runtime ACI 2 (que sigue teniendo los UUIDs de Spring Boot frescos). (b) Hex 32 chars sin guiones (App Insights OperationId del Java agent): busca en union AppRequests/Dependencies/Traces/Exceptions del workspace 2 via OperationId. Hallazgo arquitectonico critico que motivo el cambio: los 2 sistemas de correlacion son paralelos (Spring Boot MDC genera UUID propio, AI Java agent genera OperationId hex propio, no se cruzan). Esto reemplaza el plan original de migrar workspace ID (no servia porque el formato de UUID es distinto). Nueva utility kql_operation_id_appinsights, _is_appinsights_operation_id, _search_correlation_in_runtime_buffer
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -260,12 +260,9 @@ def _escape(value: str) -> str:
 
 
 def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
-    """Reconstruye el viaje de una peticion HTTP por correlation_id.
-    Esquema real (inspeccion empirica del workspace): el JSON en Message tiene
-    `correlation_id` (99.5% cobertura) y `codigo_error` (22.7%, en ESPANOL).
-    NO existe campo de identidad `usuario`/`user`/`userId` — el correlador
-    unico es correlation_id.
-    """
+    """Reconstruye el viaje de una peticion via correlation_id de Spring Boot
+    (UUID con guiones) sobre el workspace legacy (ContainerInstanceLog_CL
+    con JSON estructurado y campo `correlation_id` en p)."""
     cid = _escape(correlation_id)
     hours = max(1, min(int(time_range_hours or 12), 168))
     return (
@@ -283,6 +280,71 @@ def kql_correlation_id(correlation_id: str, time_range_hours: int) -> str:
         "| order by TimeGenerated asc\n"
         "| take 30"
     )
+
+
+def kql_operation_id_appinsights(operation_id: str, time_range_hours: int) -> str:
+    """Reconstruye el viaje de una peticion via OperationId de Application
+    Insights (hex 32 chars sin guiones, generado por el Java agent) sobre
+    AppRequests + AppDependencies + AppTraces + AppExceptions del workspace 2."""
+    op = _escape(operation_id)
+    hours = max(1, min(int(time_range_hours or 12), 168))
+    return (
+        "union AppRequests, AppDependencies, AppTraces, AppExceptions\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        f"| where OperationId == '{op}'\n"
+        "| extend evento_tipo = case(\n"
+        "    Type == 'AppRequests', strcat('REQUEST ', tostring(ResultCode)),\n"
+        "    Type == 'AppDependencies', strcat('DEP ', tostring(Type)),\n"
+        "    Type == 'AppTraces', strcat('TRACE ', tostring(SeverityLevel)),\n"
+        "    Type == 'AppExceptions', strcat('EXCEPTION ', tostring(ExceptionType)),\n"
+        "    Type)\n"
+        "| project TimeGenerated, Type, evento_tipo,\n"
+        "    nombre = coalesce(tostring(Name), tostring(Target), 'n/a'),\n"
+        "    duracion_ms = toreal(DurationMs),\n"
+        "    detalle = substring(coalesce(tostring(Message), tostring(OuterMessage), tostring(Data), ''), 0, 200)\n"
+        "| order by TimeGenerated asc\n"
+        "| take 30"
+    )
+
+
+def _is_appinsights_operation_id(s: str) -> bool:
+    """Detecta si el string es un OperationId de App Insights (32 hex chars,
+    sin guiones) en lugar de un correlation_id de Spring Boot (UUID con guiones)."""
+    s = (s or "").strip()
+    if len(s) != 32 or "-" in s:
+        return False
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def _search_correlation_in_runtime_buffer(correlation_id: str) -> dict:
+    """Busca el correlation_id de Spring Boot directamente en el stdout del
+    runtime ACI 2 (cuando el workspace legacy no lo tiene). Devuelve dict
+    compatible con _kql_result_to_payload."""
+    cid = (correlation_id or "").strip()
+    try:
+        recs = fetch_aci_runtime_logs(tail=2000)
+    except Exception as exc:
+        return {"error": f"runtime fallback fallo: {exc}", "data": []}
+    matches = [r for r in recs if isinstance(r, dict) and r.get("correlation_id") == cid]
+    if not matches:
+        return {"rows": 0, "data": [], "_note": f"sin coincidencias en buffer runtime (~3h) para {cid}"}
+    rows = []
+    for r in matches:
+        rows.append({
+            "TimeGenerated": r.get("@timestamp"),
+            "Tabla": "RuntimeBuffer",
+            "level": r.get("level"),
+            "error_code": r.get("error_code"),
+            "usuario": r.get("usuario"),
+            "logger": r.get("logger_name"),
+            "msg": (r.get("message") or "")[:300],
+        })
+    rows.sort(key=lambda x: x.get("TimeGenerated") or "")
+    return {"rows": len(rows), "data": rows, "_source": "runtime_buffer_aci2 (fallback)"}
 
 
 def kql_tlnt_lookup(codigo_error: str, time_range_hours: int) -> str:
@@ -857,12 +919,23 @@ def query_app_insights(modo: str, time_range_hours: int = 1) -> dict:
         return {"error": f"AI query fallo: {exc}", "query_used": query, "elapsed_seconds": round(elapsed, 2), "data": []}
 
 
-def execute_kql(query: str) -> dict:
+# Workspace 2 (donde vive la telemetria del agente AI Java + diagnostic
+# settings del ACI 2). Hardcoded por consistencia — los datos viven ahi
+# por configuracion de la plataforma, no por preferencia operativa.
+WORKSPACE_ID_APPINSIGHTS = "14135f7a-c66a-492c-8c8b-124cdea16c2d"
+
+
+def execute_kql(query: str, workspace_id: Optional[str] = None) -> dict:
+    """Ejecuta KQL contra Log Analytics. Por default usa el workspace del
+    .env (legacy ContainerInstanceLog_CL). Si se pasa workspace_id, hace
+    override — util para consultar AppRequests/Traces/Deps que viven en
+    otro workspace."""
     if "| take " not in query.lower() and "| top " not in query.lower():
         query = query.rstrip() + " | take 100"
     token = get_la_token()
+    ws = workspace_id or ENV["LOG_ANALYTICS_WORKSPACE_ID"]
     resp = requests.post(
-        f"https://api.loganalytics.azure.com/v1/workspaces/{ENV['LOG_ANALYTICS_WORKSPACE_ID']}/query",
+        f"https://api.loganalytics.azure.com/v1/workspaces/{ws}/query",
         json={"query": query},
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         timeout=60,
@@ -1246,22 +1319,26 @@ TOOL_QUERY_LA = FunctionTool(
 TOOL_LOOKUP_CID = FunctionTool(
     name="lookup_correlation_id",
     description=(
-        "Recupera todos los eventos de una peticion HTTP a partir de su "
-        "correlation_id, en una ventana hacia atras. El bridge construye la "
-        "KQL optima (parse_json del campo Message + filtro exacto + project "
-        "de columnas utiles + orden cronologico ascendente + take 30) — NO "
-        "tienes que escribir KQL ni preocuparte por nombres de campos. Usala "
-        "para reconstruir el viaje de una peticion identificada por su UUID "
-        "de correlacion. Si devuelve 0 filas, el correlation_id no aparece "
-        "en logs en esa ventana — no insistas con discovery, sugiere "
-        "ampliar la ventana o validar el UUID."
+        "Recupera todos los eventos asociados a un identificador de "
+        "correlacion de peticion HTTP. La tool auto-detecta el formato y "
+        "consulta la fuente apropiada:\n"
+        "  - UUID con guiones (ej '870648ea-9cf2-4ed8-bf76-8251408c5808'): "
+        "busca en logs estructurados de la app (correlation_id del "
+        "framework). Si no encuentra en el sistema de monitoreo, hace "
+        "fallback al buffer reciente del runtime.\n"
+        "  - Hex 32 chars sin guiones (ej '93e2d9a9611481cdaac258b9b1894fa2'): "
+        "busca en la telemetria aplicativa (AppRequests + AppDependencies + "
+        "AppTraces + AppExceptions) por OperationId, devolviendo la "
+        "trazabilidad cross-tabla.\n"
+        "Si la tool devuelve 0 filas, sugiere al operador ampliar ventana "
+        "o validar el formato del identificador."
     ),
     parameters={
         "type": "object",
         "properties": {
             "correlation_id": {
                 "type": "string",
-                "description": "UUID de correlacion exacto (ej. 870648ea-9cf2-4ed8-bf76-8251408c5808).",
+                "description": "Identificador de correlacion: UUID con guiones (framework de la app) o hex 32 chars sin guiones (OperationId de telemetria aplicativa).",
             },
             "time_range_hours": {
                 "type": "integer",
@@ -1664,16 +1741,61 @@ def process_response_items(
 
             # ---- Tools especializadas (bridge construye el KQL) ----
             if item.name == "lookup_correlation_id":
-                cid = args.get("correlation_id", "")
+                cid = (args.get("correlation_id", "") or "").strip()
                 hrs = int(args.get("time_range_hours") or 12)
                 if force_extra_vars and "time_range_hours" in force_extra_vars:
                     hrs = int(force_extra_vars["time_range_hours"])
-                query = kql_correlation_id(cid, hrs)
-                fn_outputs.append(_run_specialized_kql(
-                    hop=hop, tool_name="lookup_correlation_id",
-                    args_for_event={"correlation_id": cid, "time_range_hours": hrs},
-                    query=query, emit=emit, call_id=item.call_id,
-                ))
+                # Auto-routing por formato:
+                #   - OperationId AI (32 hex, sin guiones) -> AppRequests/Traces/Deps
+                #   - UUID Spring Boot (con guiones) -> ContainerInstanceLog_CL legacy
+                #     + fallback al runtime buffer ACI 2 si workspace vacio.
+                if _is_appinsights_operation_id(cid):
+                    query = kql_operation_id_appinsights(cid, hrs)
+                    _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_correlation_id",
+                                 "args": {"correlation_id": cid, "time_range_hours": hrs, "fuente": "App Insights OperationId"}})
+                    _emit(emit, {"type": "tool.kql.query", "hop": hop, "query": query, "built_by": "bridge"})
+                    t0 = time.time()
+                    result = execute_kql(query, workspace_id=WORKSPACE_ID_APPINSIGHTS)
+                    elapsed = time.time() - t0
+                    if "error" in result:
+                        _emit(emit, {"type": "tool.kql.error", "hop": hop, "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                    else:
+                        _emit(emit, {"type": "tool.kql.done", "hop": hop, "rows": result.get("rows", 0), "elapsed_seconds": round(elapsed, 1)})
+                    fn_outputs.append({
+                        "type": "function_call_output",
+                        "call_id": item.call_id,
+                        "output": _kql_result_to_payload(result),
+                    })
+                else:
+                    query = kql_correlation_id(cid, hrs)
+                    _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_correlation_id",
+                                 "args": {"correlation_id": cid, "time_range_hours": hrs, "fuente": "ContainerInstanceLog_CL (legacy)"}})
+                    _emit(emit, {"type": "tool.kql.query", "hop": hop, "query": query, "built_by": "bridge"})
+                    t0 = time.time()
+                    result = execute_kql(query)
+                    elapsed = time.time() - t0
+                    rows = result.get("rows", 0) if "error" not in result else 0
+                    if rows == 0 and "error" not in result:
+                        # Fallback al buffer runtime del ACI 2 — busca el correlation_id
+                        # de Spring Boot directamente en el stdout. Util cuando los logs
+                        # del ACI nuevo no llegan al workspace legacy.
+                        _emit(emit, {"type": "tool.runtime.fetch", "hop": hop,
+                                     "source": f"fallback al buffer runtime de TALENTO (~3h)"})
+                        result = _search_correlation_in_runtime_buffer(cid)
+                        rows = result.get("rows", 0)
+                        _emit(emit, {"type": "tool.runtime.done", "hop": hop, "rows": rows,
+                                     "buffer_lineas": 2000, "elapsed_seconds": round(time.time() - t0, 1)})
+                    elif "error" in result:
+                        _emit(emit, {"type": "tool.kql.error", "hop": hop,
+                                     "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                    else:
+                        _emit(emit, {"type": "tool.kql.done", "hop": hop, "rows": rows,
+                                     "elapsed_seconds": round(elapsed, 1)})
+                    fn_outputs.append({
+                        "type": "function_call_output",
+                        "call_id": item.call_id,
+                        "output": _kql_result_to_payload(result),
+                    })
             elif item.name == "tlnt_explorer":
                 # Unifica top + lookup: codigo vacio -> top ranking; con codigo -> instancias.
                 codigo = args.get("codigo", "") or ""
