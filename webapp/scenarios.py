@@ -234,30 +234,31 @@ SCENARIOS = {
         "subtitle": "Usuarios con >=3 fallos de auth (TLNT-002/008/009/011)",
         "prompt": (
             "Detecta usuarios con patron de fuerza bruta en TALENTO "
-            "(ultimas 3 horas).\n\n"
+            "(ultimas 3 horas) con umbral >={failed_threshold} fallos.\n\n"
             "PASO 1: Llama a lookup_runtime_logs con modo='brute_force', "
-            "usuario='', minutos=180. La tool agrupa fallos de "
-            "autenticacion (TLNT-002 credenciales invalidas, TLNT-008 "
-            "password incorrecta, TLNT-009 cuenta bloqueada, TLNT-011 "
-            "intentos excedidos) por usuario con umbral >=3 fallos.\n\n"
+            "usuario='', minutos=180, threshold={failed_threshold}. La tool "
+            "agrupa fallos de autenticacion (TLNT-002 credenciales invalidas, "
+            "TLNT-008 password incorrecta, TLNT-009 cuenta bloqueada, "
+            "TLNT-011 intentos excedidos) por usuario y filtra los que "
+            "superen el umbral.\n\n"
             "PASO 2: Si devuelve 0 filas, indica 'sin patrones de fuerza "
-            "bruta en las ultimas 3 horas con umbral >=3'.\n\n"
+            "bruta en las ultimas 3 horas con umbral >={failed_threshold}'.\n\n"
             "PASO 3: Para cada usuario sospechoso, consulta file_search por "
             "los codigos TLNT involucrados para citar su definicion.\n\n"
             "Sintetiza: lista de usuarios sospechosos con severidad (HIGH "
             ">=10, MEDIUM >=5, LOW >=3), codigos involucrados, primera y "
             "ultima vez, recomendacion (bloqueo manual, notificacion a SOC, "
             "auditoria forense via correlation_id). Incluye nota explicativa: "
-            "'analisis sobre actividad reciente de las ultimas ~3 horas; para "
-            "deteccion historica mas amplia se requiere consulta al sistema "
-            "de monitoreo'."
+            "'analisis sobre actividad reciente de las ultimas ~3 horas con "
+            "umbral configurado >={failed_threshold}; para deteccion historica "
+            "mas amplia se requiere consulta al sistema de monitoreo'."
         ),
         "expected_jt": None,
         "renderer": "generic",  # antes "brute-force" (artifacts AWX); ahora runtime bridge devuelve texto sintetizado
         "pain_point": "Accesos no autorizados — TLNT-002/008/009/011 agrupados por usuario",
         "card_class": "card-critical",
         "free_text": False,
-        "accepts_filters": [],
+        "accepts_filters": ["failed_threshold"],
         "tier": "primary",
     },
     "user-activity": {
@@ -293,9 +294,25 @@ SCENARIOS = {
     "performance-analysis": {
         "title": "Analisis de Performance",
         "icon": "⏱️",
-        "subtitle": "Latencia por endpoint, throughput, dependencias",
+        "subtitle": "Latencia, errores HTTP, throughput y dependencias",
         "prompt": (
-            "Capacidad pendiente — requiere telemetria aplicativa activa."
+            "Analiza la performance aplicativa de TALENTO en las ultimas "
+            "{time_range_hours} horas usando la telemetria del sistema.\n\n"
+            "PASO 1: Llama a lookup_app_insights con modo='top_endpoints' y "
+            "time_range_hours={time_range_hours}. Devuelve los endpoints mas "
+            "llamados con success_rate, P50 y P95.\n\n"
+            "PASO 2: Si hay endpoints con P95 alta (>1000 ms), llama a "
+            "lookup_app_insights con modo='latency_p95' y time_range_hours="
+            "{time_range_hours} para detalle de los mas lentos.\n\n"
+            "PASO 3: Llama a lookup_app_insights con modo='errors_5xx' para "
+            "verificar si hay HTTP 5xx en la ventana.\n\n"
+            "PASO 4: Si se detectan errores o latencia anomala, llama a "
+            "lookup_app_insights con modo='slow_deps' para identificar "
+            "dependencias (SQL, llamadas externas) responsables.\n\n"
+            "Sintetiza: top 3 endpoints con su carga + latencia, anomalias "
+            "(error rate >1% o P95 >1s), dependencias lentas si aplica, y "
+            "recomendaciones (escalado, cache, query tuning). Reporta en "
+            "espanol estructurado (Hallazgo, Hipotesis, Pasos, Recomendacion)."
         ),
         "expected_jt": None,
         "renderer": "generic",
@@ -303,13 +320,7 @@ SCENARIOS = {
         "card_class": "card-warning",
         "free_text": False,
         "accepts_filters": ["time_range_hours"],
-        "tier": "pending",
-        "pending_eapps_reason": (
-            "Requiere activacion de telemetria de Application Insights en "
-            "el sistema: las tablas AppRequests, AppExceptions, AppDependencies, "
-            "AppMetrics estan en cero filas en los ultimos 30 dias. Pendiente "
-            "de habilitacion por el equipo de plataforma."
-        ),
+        "tier": "primary",
     },
 
     # ═══════════════════════════════════════════════════════════════════════

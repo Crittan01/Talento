@@ -164,7 +164,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v18-cards-mejoradas"  # v18: cards Teams enriquecidas. (1) vars/tlnt_catalog.yml comun (15 codigos con title+description+severity). (2) roles/teams_card con template Jinja parametrizado (header con badge severidad, FactSet, secciones, Action.OpenUrl). (3) errors-analysis refactor para usar role + resolver TLNT del top messages contra catalogo. (4) Helper notify_teams_finding() en bridge con construccion JSON Adaptive Card directa. (5) Auto-trigger desde lookup_runtime_logs: user_audit -> card por usuario con risk_score (errores/total %), modulos, codigos con def, sample correlation_ids + link al dashboard; brute_force -> card con usuarios sospechosos, badge severidad del aggregator, velocidad de ataque (fails/seg) + link. Cero refactor de sox-audit.yml/brute-force-detector.yml (no se invocan via dashboard, mantienen su card AWX original)
+CATALOG_VERSION = "v19-insights-classic-bridge"  # v19: (1) Bridge directo a Application Insights (modo Classic) — EAPPS tenia razon, AI esta activo pero su componente esta en Classic y no Workspace-based; queries van contra `requests`/`exceptions`/etc del componente, no `AppRequests`/`AppExceptions` del workspace. Tool nueva lookup_app_insights con 6 modos: top_endpoints, latency_p95, errors_5xx, slow_deps, top_exceptions, throughput. SDK azure-monitor-query con SP. (2) Scenario performance-analysis reactivado de pending->primary con la tool nueva. (3) Fix threshold brute-force: aggregator + tool schema + handler + scenario propagan failed_threshold del UI (default 5, min 2). 9/9 scenarios primary funcionando. Pendiente solo (futuro hardening): migrar AI a workspace-based
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -494,7 +494,7 @@ def fetch_aci_runtime_logs(tail: int = 2000, since_minutes: Optional[int] = None
     return records
 
 
-def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: str = "") -> dict:
+def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: str = "", threshold: int = 3) -> dict:
     """Agregaciones en memoria sobre los logs del runtime — no requiere KQL.
     Modos:
       - 'user_audit': para 1 usuario, resumen agregado.
@@ -545,17 +545,18 @@ def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: 
         data = [{"codigo": code, "ocurrencias": n} for code, n in c.most_common(10)]
         return {"rows": len(data), "data": data}
     if mode == "brute_force":
-        # Agrupar fallos de auth por usuario
+        # Agrupar fallos de auth por usuario.
+        # Threshold viene del filtro UI (default 3, minimo 2).
         by_user = defaultdict(list)
         for r in records:
             code = r.get("error_code")
             user = r.get("usuario")
             if code in AUTH_CODES and user:
                 by_user[user].append(r)
-        threshold = 3
+        thr_val = max(2, int(threshold or 3))
         sospechosos = []
         for u, evts in by_user.items():
-            if len(evts) >= threshold:
+            if len(evts) >= thr_val:
                 ts = sorted(e.get("@timestamp", "") for e in evts)
                 sospechosos.append({
                     "usuario": u,
@@ -744,6 +745,116 @@ def notify_teams_finding(
     except Exception as exc:
         elapsed = time.time() - t0
         return {"error": str(exc), "elapsed_seconds": round(elapsed, 2), "ok": False}
+
+
+# ============================================================================
+# Application Insights (Classic) — bridge directo al componente AI mientras
+# plataforma migra a workspace-based. SDK azure-monitor-query con SP.
+# ============================================================================
+_AI_CLIENT_CACHE = {}
+
+
+def _get_logs_query_client():
+    key = (ENV.get("AZURE_TENANT_ID"), ENV.get("AZURE_CLIENT_ID"))
+    if key not in _AI_CLIENT_CACHE:
+        from azure.identity import ClientSecretCredential
+        from azure.monitor.query import LogsQueryClient
+        cred = ClientSecretCredential(
+            tenant_id=ENV["AZURE_TENANT_ID"],
+            client_id=ENV["AZURE_CLIENT_ID"],
+            client_secret=ENV["AZURE_CLIENT_SECRET"],
+        )
+        _AI_CLIENT_CACHE[key] = LogsQueryClient(cred)
+    return _AI_CLIENT_CACHE[key]
+
+
+def _ai_resource_id() -> str:
+    sub = ENV["AZURE_SUBSCRIPTION_ID"]
+    rg = ENV.get("APP_INSIGHTS_RESOURCE_GROUP", "rg-central-solucion-talento2")
+    name = ENV.get("APP_INSIGHTS_NAME", "ai-central-ecopetrol2")
+    return f"/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Insights/components/{name}"
+
+
+def query_app_insights(modo: str, time_range_hours: int = 1) -> dict:
+    """Consulta el componente AI Classic con KQL por modo predefinido.
+    Modos:
+      - top_endpoints: top URLs por volumen + P50/P95 + tasa de exito
+      - latency_p95:    p50/p95/p99 global y por endpoint
+      - errors_5xx:     requests con resultCode >= 500
+      - slow_deps:      dependencies con duration alta
+      - top_exceptions: tipo de excepcion + count
+      - throughput:     requests/min en ventana
+    Devuelve dict con `rows`, `data`, `columns`, `error` (compatible
+    con _kql_result_to_payload para que el agente lo digiera igual).
+    """
+    from datetime import timedelta
+    hours = max(1, min(int(time_range_hours or 1), 168))
+    queries = {
+        "top_endpoints": (
+            f"requests | where timestamp > ago({hours}h) "
+            "| summarize total=count(), ok=countif(success==true), p50=percentile(duration,50), "
+            "p95=percentile(duration,95) by name "
+            "| extend success_rate=round(100.0*ok/total, 1) "
+            "| order by total desc | take 10"
+        ),
+        "latency_p95": (
+            f"requests | where timestamp > ago({hours}h) "
+            "| summarize total=count(), p50=percentile(duration,50), p95=percentile(duration,95), "
+            "p99=percentile(duration,99), max=max(duration) by name "
+            "| order by p95 desc | take 10"
+        ),
+        "errors_5xx": (
+            f"requests | where timestamp > ago({hours}h) "
+            "| where toint(resultCode) >= 500 "
+            "| summarize count=count(), p95_latency=percentile(duration,95) by name, resultCode "
+            "| order by count desc | take 15"
+        ),
+        "slow_deps": (
+            f"dependencies | where timestamp > ago({hours}h) "
+            "| summarize total=count(), p50=percentile(duration,50), p95=percentile(duration,95), "
+            "fails=countif(success==false) by type, target, name "
+            "| where p95 > 1000 or fails > 0 "
+            "| order by p95 desc | take 15"
+        ),
+        "top_exceptions": (
+            f"exceptions | where timestamp > ago({hours}h) "
+            "| summarize count=count() by type, outerMessage = substring(outerMessage, 0, 200) "
+            "| order by count desc | take 10"
+        ),
+        "throughput": (
+            f"requests | where timestamp > ago({hours}h) "
+            "| summarize requests_per_min=count() by bin(timestamp, 1m) "
+            "| order by timestamp asc"
+        ),
+    }
+    if modo not in queries:
+        return {"error": f"modo desconocido: {modo}. Validos: {list(queries.keys())}", "data": []}
+    query = queries[modo]
+    t0 = time.time()
+    try:
+        client = _get_logs_query_client()
+        from azure.monitor.query import LogsQueryStatus
+        response = client.query_resource(
+            _ai_resource_id(),
+            query,
+            timespan=timedelta(hours=hours),
+        )
+        elapsed = time.time() - t0
+        if response.status == LogsQueryStatus.SUCCESS:
+            tables = response.tables
+        else:
+            tables = response.partial_data
+        if not tables:
+            return {"rows": 0, "data": [], "query_used": query, "elapsed_seconds": round(elapsed, 2)}
+        t = tables[0]
+        cols = [c for c in t.columns]
+        rows = []
+        for r in t.rows:
+            rows.append({cols[i]: r[i] for i in range(len(cols))})
+        return {"rows": len(rows), "columns": cols, "data": rows, "query_used": query, "elapsed_seconds": round(elapsed, 2)}
+    except Exception as exc:
+        elapsed = time.time() - t0
+        return {"error": f"AI query fallo: {exc}", "query_used": query, "elapsed_seconds": round(elapsed, 2), "data": []}
 
 
 def execute_kql(query: str) -> dict:
@@ -978,10 +1089,13 @@ def build_system_instructions() -> str:
         "    top_codes, brute_force. Ventana ~3h. PREFIRELA cuando el operador "
         "    pida 'reciente', 'ultimas horas', 'ahora mismo', auditoria SOX "
         "    por usuario, o deteccion de fuerza bruta.\n\n"
+        "1e. lookup_app_insights(modo, time_range_hours): telemetria "
+        "    aplicativa de TALENTO. 6 modos: top_endpoints, latency_p95, "
+        "    errors_5xx, slow_deps, top_exceptions, throughput. USALA cuando "
+        "    el operador pida analisis de performance, latencia, RCA de "
+        "    lentitud, errores HTTP, dependencias lentas o excepciones.\n\n"
         "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de "
-        "    las 4 anteriores cubre el caso. Para correlation_id, codigos TLNT, "
-        "    actividad por usuario y operaciones de seguridad USA SIEMPRE la "
-        "    tool especializada.\n\n"
+        "    las 5 anteriores cubre el caso.\n\n"
         "**REGLA DE FUENTE**: Si el operador pide datos de actividad reciente "
         "('ahora mismo', 'ultimos minutos/horas'), auditoria SOX por usuario, "
         "o deteccion de fuerza bruta -> usa lookup_runtime_logs. Si pide "
@@ -1258,12 +1372,54 @@ TOOL_RUNTIME_LOGS = FunctionTool(
                 "type": "integer",
                 "description": "Filtrar a ultimos N minutos (default 180 = 3h buffer completo).",
             },
+            "threshold": {
+                "type": "integer",
+                "description": "Minimo de fallos por usuario para marcar como sospechoso en modo brute_force (default 3, min 2). Ignorado en otros modos.",
+            },
         },
-        "required": ["modo", "usuario", "minutos"],
+        "required": ["modo", "usuario", "minutos", "threshold"],
         "additionalProperties": False,
     },
     strict=True,
 )
+
+# Tool de Application Insights (telemetria aplicativa: latencia, errores
+# 5xx, dependencies, excepciones, throughput). El bridge consulta el
+# componente AI directamente con KQL templated por modo.
+TOOL_APP_INSIGHTS = FunctionTool(
+    name="lookup_app_insights",
+    description=(
+        "Consulta telemetria aplicativa de TALENTO (Application Insights). "
+        "Devuelve datos de performance, errores HTTP, dependencias lentas y "
+        "excepciones. Modos disponibles:\n"
+        "  - top_endpoints: top URLs por volumen con success rate, P50, P95.\n"
+        "  - latency_p95: P50/P95/P99 por endpoint (los mas lentos primero).\n"
+        "  - errors_5xx: requests con HTTP 5xx por endpoint y codigo.\n"
+        "  - slow_deps: dependencies (queries SQL, llamadas externas) con "
+        "P95 > 1s o con fallos.\n"
+        "  - top_exceptions: excepciones agrupadas por tipo y mensaje.\n"
+        "  - throughput: requests/min en la ventana (serie temporal).\n"
+        "USALA para analisis de performance, RCA de lentitud, "
+        "investigacion de errores HTTP, o salud de dependencias externas."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "modo": {
+                "type": "string",
+                "description": "top_endpoints | latency_p95 | errors_5xx | slow_deps | top_exceptions | throughput",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras (default 1, max 168).",
+            },
+        },
+        "required": ["modo", "time_range_hours"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 
 def build_tool_run_awx() -> FunctionTool:
     """Tool spec con descripcion construida con los JT IDs activos."""
@@ -1376,6 +1532,7 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_TLNT_EXPLORER,
         TOOL_USER_ACTIVITY,
         TOOL_RUNTIME_LOGS,
+        TOOL_APP_INSIGHTS,
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -1545,12 +1702,15 @@ def process_response_items(
                 modo = args.get("modo", "top_users")
                 usr = args.get("usuario", "") or ""
                 minutos = int(args.get("minutos") or 180)
-                print(f"     RUNTIME[{modo}] usuario='{usr}' minutos={minutos}")
+                threshold = int(args.get("threshold") or 3)
+                if force_extra_vars and "failed_threshold" in force_extra_vars:
+                    threshold = int(force_extra_vars["failed_threshold"])
+                print(f"     RUNTIME[{modo}] usuario='{usr}' minutos={minutos} threshold={threshold}")
                 _emit(emit, {
                     "type": "tool.call",
                     "hop": hop,
                     "tool": "lookup_runtime_logs",
-                    "args": {"modo": modo, "usuario": usr, "minutos": minutos},
+                    "args": {"modo": modo, "usuario": usr, "minutos": minutos, "threshold": threshold},
                 })
                 _emit(emit, {
                     "type": "tool.runtime.fetch",
@@ -1560,7 +1720,7 @@ def process_response_items(
                 t0 = time.time()
                 try:
                     records = fetch_aci_runtime_logs(tail=2000, since_minutes=minutos)
-                    result = aggregate_runtime_logs(records, modo, usuario=usr)
+                    result = aggregate_runtime_logs(records, modo, usuario=usr, threshold=threshold)
                     result["_modo"] = modo
                     result["_buffer_lineas"] = len([r for r in records if isinstance(r, dict) and "_error" not in r])
                 except Exception as exc:
@@ -1689,6 +1849,47 @@ def process_response_items(
                     "type": "function_call_output",
                     "call_id": item.call_id,
                     "output": payload,
+                })
+            elif item.name == "lookup_app_insights":
+                modo = args.get("modo", "top_endpoints")
+                hrs = int(args.get("time_range_hours") or 1)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                print(f"     AI[{modo}] ventana={hrs}h")
+                _emit(emit, {
+                    "type": "tool.call",
+                    "hop": hop,
+                    "tool": "lookup_app_insights",
+                    "args": {"modo": modo, "time_range_hours": hrs},
+                })
+                _emit(emit, {
+                    "type": "tool.ai.fetch",
+                    "hop": hop,
+                    "source": f"telemetria aplicativa TALENTO (modo {modo}, ventana {hrs}h)",
+                })
+                t0 = time.time()
+                result = query_app_insights(modo, hrs)
+                elapsed = time.time() - t0
+                if "error" in result:
+                    print(f"     ⚠️  AI ERROR ({elapsed:.1f}s): {result['error'][:200]}")
+                    _emit(emit, {
+                        "type": "tool.ai.error",
+                        "hop": hop,
+                        "error": result.get("error"),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
+                else:
+                    print(f"     ✓ AI OK ({elapsed:.1f}s): {result.get('rows', 0)} filas")
+                    _emit(emit, {
+                        "type": "tool.ai.done",
+                        "hop": hop,
+                        "rows": result.get("rows", 0),
+                        "elapsed_seconds": round(elapsed, 1),
+                    })
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": _kql_result_to_payload(result),
                 })
             # ---- Escape hatch: query_log_analytics (query libre) ----
             elif item.name == "query_log_analytics":
