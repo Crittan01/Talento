@@ -52,7 +52,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 PROJECT_ENDPOINT = "https://aifoundry-is2.services.ai.azure.com/api/projects/proj-foundry-is2"
 MODEL_DEPLOYMENT = "talento-gpt4o"  # v7: gpt-4o full (mejor resistencia a jailbreaks vs gpt-4o-mini)
 
-ENV_PATH = Path(__file__).parent / ".env"
+# El .env vive en la raiz del proyecto (talento-ecopetrol/), un nivel arriba
+# de function-app/. En Azure Function no existe (todo en App Settings via
+# os.environ); en local la raiz del repo es la fuente de verdad.
+ENV_PATH = Path(__file__).parent.parent / ".env"
 
 
 # ============================================================================

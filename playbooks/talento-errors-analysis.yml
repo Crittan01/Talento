@@ -177,6 +177,7 @@
       ansible.builtin.uri:
         url: "{{ teams_webhook_url }}"
         method: POST
+        validate_certs: no
         headers:
           Content-Type: "application/json"
         body_format: json
