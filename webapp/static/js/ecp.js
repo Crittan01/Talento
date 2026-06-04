@@ -144,18 +144,18 @@
     // Cards de info NO disparan run (las maneja sidebar.addEventListener via data-info-view)
     if (card.dataset.infoView) return;
 
-    // Pending de EAPPS: render explicativo en el panel principal, sin alert nativo.
+    // Roadmap (en habilitacion): render explicativo en el panel principal, sin alert nativo.
     if (card.dataset.tier === 'pending') {
-      const reason = card.dataset.pendingReason || card.title || 'Esperando EAPPS';
+      const reason = card.dataset.pendingReason || card.title || 'En habilitacion';
       const title = card.querySelector('.ecp-sidebar-card__title')?.textContent || 'Escenario pendiente';
       if (el && el.timeline) {
         el.timeline.innerHTML = `
           <div class="info-finding info-finding--pending" style="margin:12px;padding:16px;border-left:4px solid #f0ad4e;background:#fff8e1;border-radius:4px;">
-            <h3 style="margin-top:0;color:#8a6d3b;">⏳ ${title} — esperando EAPPS</h3>
+            <h3 style="margin-top:0;color:#8a6d3b;">⏳ ${title} — capacidad en habilitacion</h3>
             <p style="line-height:1.5;color:#5c4b1f;">${reason}</p>
             <p style="font-size:12px;color:#8a6d3b;margin-bottom:0;">
-              Cuando EAPPS habilite el dato faltante, este escenario se reactiva sin tocar codigo.
-              Ver tarjeta <b>Hallazgos EAPPS</b> en el panel de informacion para detalle y comando az.
+              Cuando el equipo de plataforma habilite la capacidad faltante, este escenario se reactiva automaticamente sin cambios en el codigo.
+              Ver <b>Estado del ambiente</b> en el panel lateral para el detalle tecnico.
             </p>
           </div>`;
         if (el.resultWrap) el.resultWrap.style.display = 'none';
@@ -564,7 +564,7 @@
     cert:      { title: '🔒 Certificación SOX',     endpoint: '/api/info/cert',      renderer: 'renderCert' },
     agent:     { title: '🤖 Agente IA',              endpoint: '/api/info/agent',     renderer: 'renderAgent' },
     knowledge: { title: '📚 Knowledge Base',         endpoint: '/api/info/knowledge', renderer: 'renderKnowledge' },
-    findings:  { title: '⚠️ Hallazgos EAPPS',        endpoint: '/api/info/findings',  renderer: 'renderFindings' },
+    findings:  { title: '⚠️ Estado del ambiente',        endpoint: '/api/info/findings',  renderer: 'renderFindings' },
     runs:      { title: '📈 Historial de Runs',      endpoint: '/api/info/runs',      renderer: 'renderRuns' },
   };
 
@@ -863,7 +863,7 @@
             ${missing ? `<h5>Capacidades perdidas mientras no se resuelva</h5><ul class="info-list">${missing}</ul>` : ''}
             ${pendingActionHtml}
             <div class="info-finding__request">
-              <strong>Pedido a EAPPS:</strong> ${escapeHtml(h.request_to_eapps)}
+              <strong>Solicitud al equipo de plataforma:</strong> ${escapeHtml(h.request_to_eapps)}
             </div>
           </article>
         `;

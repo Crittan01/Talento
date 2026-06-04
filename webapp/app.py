@@ -162,7 +162,7 @@ async def api_info_knowledge_file(file_id: str):
 
 @app.get("/api/info/findings")
 async def api_info_findings():
-    """Hallazgos abiertos con EAPPS (datos empiricos validados)."""
+    """Estado del ambiente — capacidades en habilitacion y bloqueos abiertos."""
     return info_views.eapps_findings()
 
 
@@ -179,11 +179,11 @@ async def api_run(payload: RunRequest):
     if not scenario:
         raise HTTPException(404, f"scenario_id desconocido: {payload.scenario_id}")
 
-    # Pending de EAPPS: rechazar con 400 explicativo
+    # Roadmap (en habilitacion): rechazar con 400 explicativo
     if is_pending(payload.scenario_id):
         raise HTTPException(
             400,
-            f"Este escenario esta esperando datos de EAPPS y no se puede "
+            f"Este escenario esta en habilitacion y no se puede "
             f"ejecutar todavia. Razon: {scenario.get('pending_eapps_reason', 'pendiente')}",
         )
 

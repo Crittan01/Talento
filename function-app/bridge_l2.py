@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v14-aci-modular"  # v14: nombre del ACI, RG, App Service, SQL Server NO viven hardcoded en playbooks ni en knowledge. .env activo declara ACI_NAME, ACI_RESOURCE_GROUP, APPSERVICE_NAME, APPSERVICE_RESOURCE_GROUP, SQL_SERVER_NAME, SQL_RESOURCE_GROUP. Bridge inyecta esas vars como extra_vars en cada call AWX. Playbooks usan `mandatory` filter Jinja en lugar de `default(...)` -> falla rapido si faltan. Webapp info_views consume del .env via bridge_l2.ENV. mock_events alineado a aci-centralecopetrol2. Decision: target oficial = ACI moderno (aci-centralecopetrol2 en rg-central-solucion-talento2). Hallazgo 1 abierto: pipeline de logs del ACI 2 desconectado (recrear container group con diagnostics.logAnalytics, comando az en eapps_findings)
+CATALOG_VERSION = "v15-curacion-demo"  # v15: rediseno demo Ecopetrol. Tools especializadas consolidadas: tlnt_explorer (merge top + lookup) y user_activity (Plan C con coalesce(p.usuario, regex(message))). Removidas lookup_tlnt_code y top_codigos_error (absorbidas por tlnt_explorer). user_activity recupera ~2254 eventos/24h via regex sobre message. Scenarios curados: 7 primary (infra-health-check con scope, errors-production, correlation-trace, tlnt-explorer, user-activity, auto-remediate-restart, free-text) + 3 roadmap (sox-audit, brute-force, performance-analysis) con razones neutras sin mencionar "EAPPS" al cliente. UI scrubeada: "Capacidades en habilitacion" en lugar de "Esperando EAPPS"; "Estado del ambiente" en lugar de "Hallazgos EAPPS"; "equipo de plataforma" en lugar de "EAPPS"
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -337,6 +337,71 @@ def kql_top_codigos_error(time_range_hours: int) -> str:
         "by codigo\n"
         "| order by ocurrencias desc\n"
         "| take 20"
+    )
+
+
+def kql_actividad_usuario(usuario: str, time_range_hours: int) -> str:
+    """Resumen de actividad por usuario — PLAN C: usa el campo dedicado
+    `p.usuario` si esta poblado (cuando llegue al workspace el pipeline del
+    ambiente reconstruido), y como fallback extrae el username del campo
+    libre `message` con regex sobre patrones tipo "usuario 'X'". Filtra
+    placeholders ruidosos (null, nulo, nadie-<id>).
+    Verificado empiricamente: extrae ~2254 eventos/24h con usuarios reales
+    (jtorres, cmedina, jparra, dherrera, mospina, lsuarez, etc).
+    """
+    user = _escape(usuario)
+    hours = max(1, min(int(time_range_hours or 24), 168))
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        "| extend msg = tostring(p.message)\n"
+        "| extend usuario = coalesce(\n"
+        "    tostring(p.usuario),\n"
+        "    extract(\"usuario '?([a-zA-Z0-9._-]+)'?\", 1, msg)\n"
+        "  )\n"
+        "| where isnotempty(usuario)\n"
+        "| where usuario !in ('null','nulo')\n"
+        "| where usuario !startswith 'nadie-'\n"
+        f"| where tolower(usuario) == tolower('{user}')\n"
+        "| summarize "
+        "total_eventos = count(), "
+        "errores = countif(tostring(p.level) == 'ERROR'), "
+        "warns = countif(tostring(p.level) == 'WARN'), "
+        "codigos = make_set(coalesce(tostring(p.codigo_error), extract('(TLNT-[0-9]+)', 1, msg)), 10), "
+        "loggers = make_set(tostring(p.logger_name), 5), "
+        "primera_actividad = min(TimeGenerated), "
+        "ultima_actividad = max(TimeGenerated) "
+        "by usuario\n"
+        "| take 1"
+    )
+
+
+def kql_tlnt_explorer(codigo_filtro: str, time_range_hours: int) -> str:
+    """Tool unificada de codigos TLNT. Si `codigo_filtro` es vacio, devuelve
+    el TOP de codigos por frecuencia (lo que hacia kql_top_codigos_error).
+    Si trae un codigo concreto (TLNT-XXX), devuelve sus instancias recientes
+    (lo que hacia kql_tlnt_lookup). Una sola entrada de UI, dispatch automatico.
+    """
+    hours = max(1, min(int(time_range_hours or 24), 168))
+    codigo = (codigo_filtro or "").strip()
+    if not codigo:
+        return kql_top_codigos_error(hours)
+    code = _escape(codigo)
+    return (
+        "union withsource=Tabla *\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        f"| extend codigo = coalesce(tostring(p.codigo_error), extract('(TLNT-[0-9]+)', 1, Message))\n"
+        f"| where codigo == '{code}'\n"
+        "| project TimeGenerated, Tabla, "
+        "correlation_id = tostring(p.correlation_id), "
+        "level = tostring(p.level), "
+        "modulo = tostring(p.modulo), "
+        "logger = tostring(p.logger_name), "
+        "msg = substring(tostring(p.message), 0, 300)\n"
+        "| order by TimeGenerated desc\n"
+        "| take 30"
     )
 
 
@@ -554,27 +619,22 @@ def build_system_instructions() -> str:
         "TIENES TOOLS ESPECIALIZADAS QUE TE EVITAN ESCRIBIR KQL:\n\n"
         "1a. lookup_correlation_id(correlation_id, time_range_hours): reconstruye "
         "    una peticion HTTP especifica. El bridge arma la KQL — tu solo das el "
-        "    UUID y las horas. USALA para todo escenario de 'investigar correlation_id'.\n\n"
-        "1b. lookup_tlnt_code(error_code, time_range_hours): muestra instancias "
-        "    recientes de un codigo TLNT-XXX con correlation_id, level, modulo y "
-        "    mensaje. USALA cuando quieras ver donde ocurrio un codigo concreto.\n\n"
-        "1c. top_codigos_error(time_range_hours): top de codigos TLNT por "
-        "    frecuencia con correlation_ids distintos. NO requiere identidad. "
-        "    USALA para mesa de ayuda / auditoria agregada / picos.\n\n"
+        "    UUID y las horas. USALA para 'investigar correlation_id'.\n\n"
+        "1b. tlnt_explorer(codigo, time_range_hours): explora codigos TLNT. Si "
+        "    `codigo` viene vacio devuelve el TOP por frecuencia (ranking). Si "
+        "    trae un codigo concreto (ej 'TLNT-008') devuelve sus instancias "
+        "    recientes con correlation_id, level, modulo y mensaje. USALA para "
+        "    mesa de ayuda, auditoria agregada, o cuando el operador pregunta "
+        "    por un codigo especifico.\n\n"
+        "1c. user_activity(usuario, time_range_hours): resumen de actividad de "
+        "    un usuario (total eventos, errores, warns, codigos vistos, primera "
+        "    y ultima actividad). Plan hibrido: usa el campo `usuario` del JSON "
+        "    si esta poblado, o lo extrae via regex sobre `message`. Filtra "
+        "    placeholders ruidosos. USALA para auditoria SOX por usuario o "
+        "    investigacion forense.\n\n"
         "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de las "
-        "    3 anteriores cubre el caso (queries ad-hoc del operador). Para "
-        "    correlation_id, codigos TLNT y top de codigos USA SIEMPRE la tool "
-        "    especializada — escribir KQL libre cuando hay una especializada se "
-        "    considera error.\n\n"
-        "**BLOQUEO CONOCIDO** — el JSON estructurado no contiene campo de "
-        "identidad de usuario. Si el operador pide 'auditar usuario X', "
-        "'actividad de Y', 'brute force por usuario', responde explicitamente: "
-        "'Bloqueado por Hallazgo 2 (EAPPS): el logger no instrumenta el "
-        "principal autenticado en el MDC. Inspeccion del workspace en 168h "
-        "confirma 30523 eventos JSON sin campo `usuario`. Pendiente "
-        "instrumentar Logback. Mientras tanto puedo: (a) listar top codigos "
-        "TLNT, (b) reconstruir un correlation_id si lo tienes, (c) cruzar "
-        "manualmente con Azure AD/API gateway via correlation_id.'\n\n"
+        "    3 anteriores cubre el caso. Para correlation_id, codigos TLNT y "
+        "    actividad por usuario USA SIEMPRE la tool especializada.\n\n"
         "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
         "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
         "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
@@ -745,59 +805,65 @@ TOOL_LOOKUP_CID = FunctionTool(
     strict=True,
 )
 
-TOOL_LOOKUP_TLNT = FunctionTool(
-    name="lookup_tlnt_code",
+# Tool unificada de codigos TLNT — dispatch automatico:
+#   - Si `codigo` viene vacio: devuelve TOP de codigos por frecuencia.
+#   - Si `codigo` viene poblado: devuelve instancias recientes de ese codigo.
+TOOL_TLNT_EXPLORER = FunctionTool(
+    name="tlnt_explorer",
     description=(
-        "Recupera ocurrencias recientes de un codigo TLNT-XXX en logs, "
-        "ordenadas por TimeGenerated desc. Bridge construye la KQL con "
-        "fallback regex para logs viejos sin campo error_code estructurado. "
-        "Devuelve columnas proyectadas (TimeGenerated, Tabla, usuario, "
-        "correlation_id, level, logger, msg recortado). Usala cuando quieras "
-        "ver instancias concretas del codigo en el periodo."
+        "Explora codigos TLNT en logs. Una sola entrada que decide segun el "
+        "parametro `codigo`: si esta vacio, devuelve el ranking de codigos "
+        "por frecuencia (ocurrencias, correlation_ids distintos, modulos); "
+        "si trae un codigo concreto (ej 'TLNT-008'), devuelve sus instancias "
+        "recientes con correlation_id, level, modulo, logger y mensaje "
+        "recortado. Bridge construye la KQL parametrizada — el agente solo "
+        "decide el codigo (o lo deja vacio para ver el ranking)."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "error_code": {
+            "codigo": {
                 "type": "string",
-                "description": "Codigo TLNT exacto, ej. 'TLNT-008'.",
+                "description": "Codigo TLNT exacto (ej 'TLNT-008') o cadena vacia para top.",
             },
-            "time_range_hours": {
-                "type": "integer",
-                "description": "Ventana hacia atras (default 12, max 168).",
-            },
-        },
-        "required": ["error_code", "time_range_hours"],
-        "additionalProperties": False,
-    },
-    strict=True,
-)
-
-# TOOL_AUDIT_USER y TOOL_BRUTE_FORCE REMOVIDOS hasta cerrar Hallazgo 2.
-# Inspeccion empirica del workspace (30523 eventos JSON en 168h) confirmo que
-# NO existe ningun campo de identidad en el JSON top-level. Estas tools
-# devolvian sistemicamente 0 filas. Se reintroduciran cuando EAPPS
-# instrumente Logback con el principal autenticado en el MDC.
-
-TOOL_TOP_CODIGOS = FunctionTool(
-    name="top_codigos_error",
-    description=(
-        "Top de codigos TLNT por frecuencia en la ventana, con cuenta de "
-        "ocurrencias, correlation_ids distintos y modulos donde aparecen. "
-        "Bridge agrega summarize por codigo. Util para mesa de ayuda "
-        "(que codigos predominan), auditoria SOX agregada (volumen por "
-        "tipo de error) y para detectar picos. NO requiere identidad de "
-        "usuario — el agregador es el codigo en si."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
             "time_range_hours": {
                 "type": "integer",
                 "description": "Ventana hacia atras (default 24, max 168).",
             },
         },
-        "required": ["time_range_hours"],
+        "required": ["codigo", "time_range_hours"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+# Actividad por usuario — Plan C. Combina el campo dedicado `p.usuario`
+# (cuando llegue del ambiente reconstruido) con regex sobre `p.message`
+# para recuperar usuarios del ambiente actual.
+TOOL_USER_ACTIVITY = FunctionTool(
+    name="user_activity",
+    description=(
+        "Resumen agregado de actividad de un usuario: total eventos, errores, "
+        "warns, set de codigos TLNT vistos, set de loggers, primera y ultima "
+        "actividad en la ventana. Plan hibrido: usa el campo `usuario` del "
+        "JSON estructurado si esta poblado, o lo extrae del campo `message` "
+        "via regex (patron 'usuario X' o \"usuario 'X'\"). Filtra "
+        "placeholders ruidosos (null, nulo, nadie-*). Usala para auditoria "
+        "SOX por usuario o investigacion forense."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "usuario": {
+                "type": "string",
+                "description": "Username exacto a investigar (ej 'jtorres', 'cmedina').",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras (default 24, max 168).",
+            },
+        },
+        "required": ["usuario", "time_range_hours"],
         "additionalProperties": False,
     },
     strict=True,
@@ -911,8 +977,8 @@ def ensure_knowledge_vector_store(project: AIProjectClient) -> Optional[str]:
 def setup_agent_version(project: AIProjectClient):
     tools = [
         TOOL_LOOKUP_CID,
-        TOOL_LOOKUP_TLNT,
-        TOOL_TOP_CODIGOS,
+        TOOL_TLNT_EXPLORER,
+        TOOL_USER_ACTIVITY,
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -1054,27 +1120,28 @@ def process_response_items(
                     args_for_event={"correlation_id": cid, "time_range_hours": hrs},
                     query=query, emit=emit, call_id=item.call_id,
                 ))
-            elif item.name == "lookup_tlnt_code":
-                # El parametro de la tool sigue llamandose error_code (lo que
-                # ve el LLM) pero el builder usa el campo real codigo_error.
-                code = args.get("error_code", "")
-                hrs = int(args.get("time_range_hours") or 12)
-                if force_extra_vars and "time_range_hours" in force_extra_vars:
-                    hrs = int(force_extra_vars["time_range_hours"])
-                query = kql_tlnt_lookup(code, hrs)
-                fn_outputs.append(_run_specialized_kql(
-                    hop=hop, tool_name="lookup_tlnt_code",
-                    args_for_event={"error_code": code, "time_range_hours": hrs},
-                    query=query, emit=emit, call_id=item.call_id,
-                ))
-            elif item.name == "top_codigos_error":
+            elif item.name == "tlnt_explorer":
+                # Unifica top + lookup: codigo vacio -> top ranking; con codigo -> instancias.
+                codigo = args.get("codigo", "") or ""
                 hrs = int(args.get("time_range_hours") or 24)
                 if force_extra_vars and "time_range_hours" in force_extra_vars:
                     hrs = int(force_extra_vars["time_range_hours"])
-                query = kql_top_codigos_error(hrs)
+                query = kql_tlnt_explorer(codigo, hrs)
+                mode = "ranking" if not codigo.strip() else "instancias"
                 fn_outputs.append(_run_specialized_kql(
-                    hop=hop, tool_name="top_codigos_error",
-                    args_for_event={"time_range_hours": hrs},
+                    hop=hop, tool_name="tlnt_explorer",
+                    args_for_event={"codigo": codigo, "time_range_hours": hrs, "mode": mode},
+                    query=query, emit=emit, call_id=item.call_id,
+                ))
+            elif item.name == "user_activity":
+                usr = args.get("usuario", "")
+                hrs = int(args.get("time_range_hours") or 24)
+                if force_extra_vars and "time_range_hours" in force_extra_vars:
+                    hrs = int(force_extra_vars["time_range_hours"])
+                query = kql_actividad_usuario(usr, hrs)
+                fn_outputs.append(_run_specialized_kql(
+                    hop=hop, tool_name="user_activity",
+                    args_for_event={"usuario": usr, "time_range_hours": hrs},
                     query=query, emit=emit, call_id=item.call_id,
                 ))
             # ---- Escape hatch: query_log_analytics (query libre) ----

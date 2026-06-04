@@ -87,21 +87,21 @@
         </article>
         {% endfor %}
 
-        {# PENDING — 3 cards disabled mientras EAPPS resuelve #}
+        {# PENDING — capacidades en espera de habilitaciones del ambiente reconstruido #}
         {% set pending_scenarios = scenarios | selectattr('tier', 'equalto', 'pending') | list %}
         {% if pending_scenarios %}
-        <div class="ecp-sidebar__subtitle">⏳ Esperando datos de EAPPS ({{ pending_scenarios|length }} escenarios)</div>
+        <div class="ecp-sidebar__subtitle">⏳ Capacidades en habilitacion ({{ pending_scenarios|length }})</div>
         {% for s in pending_scenarios %}
         <article class="ecp-sidebar-card ecp-sidebar-card--pending"
                  data-scenario-id="{{ s.id }}"
                  data-tier="pending"
                  data-pending-reason="{{ s.pending_eapps_reason }}"
-                 title="Esperando EAPPS: {{ s.pending_eapps_reason }}">
+                 title="En habilitacion: {{ s.pending_eapps_reason }}">
           <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
           <div class="ecp-sidebar-card__body">
             <div class="ecp-sidebar-card__title">{{ s.title }}</div>
             <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-            <span class="ecp-sidebar-card__pending-badge">⏳ Esperando dato EAPPS</span>
+            <span class="ecp-sidebar-card__pending-badge">⏳ En habilitacion</span>
             <div class="ecp-sidebar-card__pending-reason">{{ s.pending_eapps_reason | truncate(160) }}</div>
           </div>
         </article>
@@ -155,10 +155,10 @@
             <div class="ecp-sidebar-card__sub">Catálogo · Runbook · KQL · JT</div>
           </div>
         </article>
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="findings" title="Hallazgos abiertos con EAPPS">
+        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="findings" title="Estado del ambiente y capacidades en habilitacion">
           <div class="ecp-sidebar-card__icon">⚠️</div>
           <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Hallazgos EAPPS</div>
+            <div class="ecp-sidebar-card__title">Estado del ambiente</div>
             <div class="ecp-sidebar-card__sub">2 puntos escalados</div>
           </div>
         </article>

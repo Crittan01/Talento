@@ -73,42 +73,31 @@ SCENARIOS = {
     # PRIMARY (6) — escenarios con datos reales en produccion
     # ═══════════════════════════════════════════════════════════════════════
     "infra-health-check": {
-        "title": "Health Check Completo",
+        "title": "Health Check",
         "icon": "🏥",
-        "subtitle": "Estado ACI + App Service + SQL en una corrida",
+        "subtitle": "Estado de infraestructura — selecciona alcance",
         "prompt": (
-            "Ejecuta directamente el job template id={jt_full_health_check} "
-            "(talento-full-health-check) con extra_vars_json='{{}}' para obtener "
-            "panorama de salud completo de la infraestructura TALENTO. Cuando "
-            "termine, sintetiza estado de cada capa (ACI, App Service, SQL), "
-            "veredicto global (HEALTHY/DEGRADED/CRITICAL) y recomendacion "
-            "concreta. Reporta en espanol estructurado."
+            "El operador pide health check con alcance='{scope}'. Mapea:\n"
+            "  - completo (default) -> id={jt_full_health_check} (talento-full-health-check)\n"
+            "  - container -> id={jt_aci_state} (talento-aci-state)\n"
+            "  - appservice -> id={jt_appservice_state} (talento-appservice-state)\n"
+            "  - sql -> id={jt_sql_health} (talento-sql-health)\n\n"
+            "Ejecuta directamente el job template correspondiente al alcance "
+            "con extra_vars_json='{{}}'. Cuando termine, sintetiza:\n"
+            "  - Si alcance=completo: estado de cada capa (ACI, App Service, SQL), "
+            "veredicto global (HEALTHY/DEGRADED/CRITICAL) y recomendacion.\n"
+            "  - Si alcance=container: nombre, state, restartCount, eventos.\n"
+            "  - Si alcance=appservice: state, availability, host, ultimo deploy.\n"
+            "  - Si alcance=sql: server status, databases (Online/Offline), tier, "
+            "tamano usado.\n\n"
+            "Indica si hay senales de problema. Reporta en espanol estructurado."
         ),
         "expected_jt": JT_IDS["jt_full_health_check"],
         "renderer": "generic",
-        "pain_point": "Vision panoramica de infraestructura",
+        "pain_point": "Diagnostico de infraestructura con alcance configurable",
         "card_class": "card-info",
         "free_text": False,
-        "accepts_filters": [],
-        "tier": "primary",
-    },
-    "system-status": {
-        "title": "Estado del Sistema",
-        "icon": "📊",
-        "subtitle": "Inventario amplio del workspace de logs",
-        "prompt": (
-            "Ejecuta directamente el job template id={jt_workspace_snapshot} "
-            "(talento-workspace-snapshot) con extra_vars_json='{{\"time_range_hours\": "
-            "{time_range_hours}}}' para obtener inventario completo del workspace "
-            "de TALENTO en las ultimas {time_range_hours} horas. Cuando termine, "
-            "sintetiza tablas pobladas, top tabla, filas, schema. Reporta en espanol."
-        ),
-        "expected_jt": JT_IDS["jt_workspace_snapshot"],
-        "renderer": "snapshot",
-        "pain_point": "Estrategia de monitoreo — vista panoramica",
-        "card_class": "card-info",
-        "free_text": False,
-        "accepts_filters": ["time_range_hours"],
+        "accepts_filters": ["scope"],
         "tier": "primary",
     },
     "errors-production": {
@@ -166,78 +155,40 @@ SCENARIOS = {
         "accepts_filters": ["time_range_hours"],
         "tier": "primary",
     },
-    "tlnt-lookup": {
-        "title": "Consultar Codigo TLNT",
+    "tlnt-explorer": {
+        "title": "Codigos TLNT",
         "icon": "📚",
-        "subtitle": "Significado oficial desde el catalogo",
+        "subtitle": "Ranking si esta vacio, definicion + instancias si das un codigo",
         "prompt": (
-            "El operador pregunta: '{user_input}'.\n\n"
-            "PASO 1: Consulta file_search con la pregunta exacta del operador "
-            "para buscar en el catalogo de codigos TLNT-XXX (knowledge base).\n\n"
-            "PASO 2: De la respuesta de file_search extrae para cada codigo "
-            "encontrado: descripcion oficial, modulo origen, accion sugerida "
-            "para soporte, solucion para usuario final. Cita textualmente del "
-            "catalogo, no parafrases.\n\n"
-            "Si el codigo no esta en el catalogo, indicalo claramente y sugiere "
-            "validar con EAPPS. NO inventes significados de codigos. NO uses "
-            "query_log_analytics para esto — file_search del catalogo es "
-            "suficiente. Reporta en espanol estructurado."
-        ),
-        "expected_jt": None,  # solo file_search
-        "renderer": "generic",
-        "pain_point": "Demo de RAG sobre knowledge base (catalogo de 15 codigos)",
-        "card_class": "card-info",
-        "free_text": True,
-        "free_text_label": "Codigo TLNT o pregunta",
-        "free_text_placeholder": "Ej: TLNT-007 o '¿que significa TLNT-014?'",
-        "accepts_filters": [],
-        "tier": "primary",
-    },
-    "top-codigos": {
-        "title": "Top Codigos TLNT",
-        "icon": "📊",
-        "subtitle": "Frecuencia de codigos de error en la ventana",
-        "prompt": (
-            "El operador pide el ranking de codigos TLNT en las ultimas "
-            "{time_range_hours} horas.\n\n"
-            "PASO 1: Llama a top_codigos_error con time_range_hours="
-            "{time_range_hours}. El bridge agrega por codigo y devuelve "
-            "ocurrencias, correlation_ids distintos, modulos y rango temporal. "
-            "NO escribas KQL.\n\n"
-            "PASO 2: Si la tool devuelve 0 filas, indica 'sin codigos de error "
-            "en la ventana'.\n\n"
-            "PASO 3: Para los 3-5 codigos mas frecuentes, consulta file_search "
-            "con cada codigo para citar su definicion del catalogo.\n\n"
-            "Sintetiza ranking, codigos predominantes con su definicion, "
-            "modulos mas afectados, ventana temporal, y recomendacion (mesa "
-            "de ayuda, escalado a EAPPS si hay codigos nuevos no catalogados). "
+            "El operador escribio: '{user_input}'.\n\n"
+            "Si el input esta VACIO: llama a tlnt_explorer con codigo='' y "
+            "time_range_hours={time_range_hours}. La tool devuelve el ranking "
+            "de codigos por frecuencia. Para los 3-5 mas frecuentes, consulta "
+            "file_search con cada codigo para citar la definicion del catalogo. "
+            "Sintetiza el ranking + las definiciones + recomendacion para mesa "
+            "de ayuda.\n\n"
+            "Si el input trae un codigo TLNT-XXX: "
+            "(a) Consulta file_search con el codigo para extraer la definicion "
+            "oficial del catalogo (descripcion, modulo, accion soporte, solucion "
+            "usuario). NO inventes significados.\n"
+            "(b) Llama a tlnt_explorer con codigo='{user_input}' y "
+            "time_range_hours={time_range_hours} para ver instancias reales en "
+            "el workspace. Si devuelve 0 filas, reporta 'sin ocurrencias en la "
+            "ventana — el catalogo lo documenta pero no hay eventos hoy'.\n"
+            "(c) Sintetiza: definicion oficial + cuantas ocurrencias + sample "
+            "de correlation_ids para investigacion forense.\n\n"
+            "Si el input es una pregunta libre ('que significa X', '¿cual es el "
+            "mas frecuente?'), interpreta y dispatcha al modo correspondiente. "
             "Reporta en espanol estructurado."
         ),
         "expected_jt": None,
         "renderer": "generic",
-        "pain_point": "Mesa de ayuda — distribucion de errores TLNT (6943 ocurrencias en 168h)",
+        "pain_point": "Mesa de ayuda — ranking + definicion + instancias en una sola tarjeta",
         "card_class": "card-info",
-        "free_text": False,
+        "free_text": True,
+        "free_text_label": "Codigo TLNT (opcional) o deja vacio para ranking",
+        "free_text_placeholder": "Ej: TLNT-008 (vacio = top ranking)",
         "accepts_filters": ["time_range_hours"],
-        "tier": "primary",
-    },
-    "container-state": {
-        "title": "Estado del Container",
-        "icon": "📦",
-        "subtitle": "Diagnostico del Azure Container Instance",
-        "prompt": (
-            "Ejecuta directamente el job template id={jt_aci_state} "
-            "(talento-aci-state) con extra_vars_json='{{}}'. Cuando termine, "
-            "sintetiza: nombre del container, state actual, restartCount, ultimo "
-            "evento, recursos asignados. Indica si hay senales de problema "
-            "(state != Running, restartCount alto, eventos BackOff/Failed)."
-        ),
-        "expected_jt": JT_IDS["jt_aci_state"],
-        "renderer": "generic",
-        "pain_point": "Diagnostico foco-container",
-        "card_class": "card-info",
-        "free_text": False,
-        "accepts_filters": [],
         "tier": "primary",
     },
 
@@ -247,12 +198,11 @@ SCENARIOS = {
     "sox-audit": {
         "title": "Auditoria SOX por Usuario",
         "icon": "🔐",
-        "subtitle": "Resumen agregado de actividad por usuario",
+        "subtitle": "Auditoria de accesos privilegiados con identidad estructurada",
         "prompt": (
-            "TALENTO es regulado por SOX. El operador pide auditar la actividad "
-            "de un usuario en las ultimas {time_range_hours} horas. Bloqueado "
-            "hasta cerrar Hallazgo 2 (instrumentacion MDC). Mientras tanto "
-            "explica al operador el bloqueo."
+            "Capacidad pendiente — la disponibilidad de campos identitarios "
+            "estructurados (usuario, rol, accion privilegiada) requiere "
+            "habilitacion en el ambiente reconstruido."
         ),
         "expected_jt": None,
         "renderer": "sox",
@@ -260,86 +210,78 @@ SCENARIOS = {
         "card_class": "card-critical",
         "free_text": True,
         "free_text_label": "Usuario a auditar",
-        "free_text_placeholder": "Ej: nvivas, jtorres",
+        "free_text_placeholder": "Ej: jtorres, cmedina",
         "accepts_filters": ["time_range_hours"],
         "tier": "pending",
         "pending_eapps_reason": (
-            "Hallazgo 2 (NUEVO): la inspeccion empirica del workspace tlnt-loganalytics "
-            "(30523 eventos JSON en 168h sobre ContainerInstanceLog_CL) confirma que el "
-            "JSON estructurado NO contiene ningun campo de identidad (usuario, user, "
-            "userName, principalName). EAPPS dijo que existia `usuario` pero no es asi. "
-            "El unico correlador es `correlation_id`. Pendiente instrumentar Logback "
-            "MDC con el principal autenticado para que aparezca como top-level del JSON. "
-            "Hasta entonces, auditoria por usuario es inviable; alternativa: cruzar "
-            "correlation_id contra Azure AD / API gateway manualmente."
+            "El ambiente reconstruido del sistema emite el campo `usuario` en "
+            "el JSON estructurado de logs (verificado en su salida), pero el "
+            "pipeline de ingesta hacia el workspace de Log Analytics no esta "
+            "habilitado todavia. Una vez conectado, el escenario se activa "
+            "automaticamente sin cambios. Para tener algun grado de auditoria "
+            "por usuario HOY, ver 'Actividad por Usuario'."
         ),
     },
     "brute-force": {
         "title": "Deteccion de Brute Force",
         "icon": "🛡️",
-        "subtitle": "Intentos fallidos por usuario (TLNT-002/008/011)",
+        "subtitle": "Patron de auth fallida por usuario (TLNT-002/008/009/011)",
         "prompt": (
-            "Detectar brute force agrupado por usuario. Bloqueado hasta cerrar "
-            "Hallazgo 2 (instrumentacion MDC con principal autenticado). "
-            "Explica al operador el bloqueo y ofrece alternativa: top_codigos_error "
-            "con foco en TLNT-002/008/011 muestra el VOLUMEN de fallos de auth "
-            "aunque no se pueda agrupar por usuario."
+            "Capacidad pendiente — la disponibilidad de los codigos de "
+            "autenticacion fallida agrupables por usuario requiere habilitacion "
+            "del pipeline de logs del ambiente reconstruido."
         ),
         "expected_jt": None,
         "renderer": "brute-force",
-        "pain_point": "Accesos no autorizados — TLNT-002/008/011",
+        "pain_point": "Accesos no autorizados — TLNT-002/008/009/011",
         "card_class": "card-critical",
         "free_text": False,
         "accepts_filters": ["time_range_hours", "failed_threshold"],
         "tier": "pending",
         "pending_eapps_reason": (
-            "Hallazgo 2 (NUEVO): el JSON estructurado no contiene campo de identidad. "
-            "Sin `usuario` en el MDC, no podemos agrupar fallos de auth por principal "
-            "y por tanto no podemos hablar de brute force por usuario. Alternativa: "
-            "usar `top_codigos_error` para ver el VOLUMEN de TLNT-002/008/011 en "
-            "ventana — si hay pico agregado, escalar a investigacion manual via "
-            "correlation_id."
+            "La logica de bloqueo por intentos fallidos ya esta implementada en "
+            "el ambiente reconstruido del sistema (verificado: emite TLNT-009 "
+            "'Login bloqueado' tras N intentos TLNT-002/008). Pendiente de "
+            "habilitar el pipeline de logs hacia el workspace para que el agente "
+            "pueda detectar y reportar el patron en tiempo real."
         ),
     },
     "user-activity": {
         "title": "Actividad por Usuario",
         "icon": "👤",
-        "subtitle": "Resumen agregado de logins, acciones y errores",
+        "subtitle": "Resumen agregado de actividad para un username",
         "prompt": (
-            "Investigacion forense por usuario. Bloqueado hasta cerrar Hallazgo 2 "
-            "(MDC). Mientras tanto, sugiere al operador usar correlation_id como "
-            "alternativa: si conoce un correlation_id de la sesion del usuario "
-            "(via API gateway o Azure AD), puede invocar el escenario 'Investigar "
-            "Correlation ID' para reconstruir el viaje de UN request especifico."
+            "Investigacion forense del usuario '{user_input}' en las ultimas "
+            "{time_range_hours} horas.\n\n"
+            "PASO 1: Llama UNA VEZ a la tool user_activity con usuario="
+            "'{user_input}' y time_range_hours={time_range_hours}. El bridge usa "
+            "el campo dedicado del JSON si esta poblado, o extrae el usuario del "
+            "mensaje libre con regex. Devuelve agregado: eventos totales, "
+            "errores, warns, codigos vistos, loggers, primera y ultima actividad.\n\n"
+            "PASO 2: Si devuelve 0 filas, indica 'sin actividad del usuario en "
+            "la ventana' y sugiere ampliar el rango o validar el username.\n\n"
+            "PASO 3: Si hay actividad y aparecen codigos TLNT-XXX en el set "
+            "'codigos', consulta file_search por cada codigo distinto para "
+            "citar su definicion del catalogo.\n\n"
+            "Sintetiza patron de actividad, errores tipicos, modulos visitados, "
+            "y veredicto operacional. Reporta en espanol estructurado."
         ),
         "expected_jt": None,
         "renderer": "generic",
-        "pain_point": "Investigacion forense por usuario",
+        "pain_point": "Investigacion forense por usuario (cobertura ~2254 eventos/24h)",
         "card_class": "card-info",
         "free_text": True,
         "free_text_label": "Username a investigar",
-        "free_text_placeholder": "Ej: jtorres, nvivas",
+        "free_text_placeholder": "Ej: jtorres, cmedina, jparra",
         "accepts_filters": ["time_range_hours"],
-        "tier": "pending",
-        "pending_eapps_reason": (
-            "Hallazgo 2 (NUEVO): no hay campo de identidad en el JSON de logs. "
-            "Mientras EAPPS no instrumente el MDC, no podemos filtrar por usuario. "
-            "Alternativa actual: si el operador tiene un correlation_id "
-            "(via Azure AD signin logs o gateway), reconstruir el viaje del "
-            "request via el escenario 'Investigar Correlation ID'."
-        ),
+        "tier": "primary",
     },
     "performance-analysis": {
         "title": "Analisis de Performance",
         "icon": "⏱️",
         "subtitle": "Latencia por endpoint, throughput, dependencias",
         "prompt": (
-            "Analiza performance de TALENTO en las ultimas {time_range_hours} "
-            "horas usando Application Insights. Ejecuta query_log_analytics "
-            "contra AppRequests para latencia P50/P95/P99 por endpoint, contra "
-            "AppDependencies para queries SQL lentas, contra AppExceptions para "
-            "errores tipados. Sintetiza endpoints mas lentos, top excepciones, "
-            "duracion promedio de queries. Reporta en espanol."
+            "Capacidad pendiente — requiere telemetria aplicativa activa."
         ),
         "expected_jt": None,
         "renderer": "generic",
@@ -349,49 +291,16 @@ SCENARIOS = {
         "accepts_filters": ["time_range_hours"],
         "tier": "pending",
         "pending_eapps_reason": (
-            "Requiere telemetria Application Insights activa: AppRequests, "
-            "AppExceptions, AppDependencies, AppMetrics. Hoy las 8 tablas App* "
-            "estan en 0 rows hace 30+ dias — TALENTO no envia telemetria."
+            "Requiere activacion de telemetria de Application Insights en "
+            "el sistema: las tablas AppRequests, AppExceptions, AppDependencies, "
+            "AppMetrics estan en cero filas en los ultimos 30 dias. Pendiente "
+            "de habilitacion por el equipo de plataforma."
         ),
     },
 
     # ═══════════════════════════════════════════════════════════════════════
     # SECONDARY — diagnostico granular + utilitarios
     # ═══════════════════════════════════════════════════════════════════════
-    "appservice-state": {
-        "title": "Estado del App Service",
-        "icon": "🌐",
-        "subtitle": "Diagnostico del Azure App Service (API)",
-        "prompt": (
-            "Ejecuta directamente el job template id={jt_appservice_state} "
-            "(talento-appservice-state) con extra_vars_json='{{}}'. Sintetiza: "
-            "estado del App Service, availability, host name. Indica problemas."
-        ),
-        "expected_jt": JT_IDS["jt_appservice_state"],
-        "renderer": "generic",
-        "pain_point": "Diagnostico foco-API",
-        "card_class": "card-info",
-        "free_text": False,
-        "accepts_filters": [],
-        "tier": "secondary",
-    },
-    "sql-health": {
-        "title": "Salud de Base de Datos",
-        "icon": "🗄️",
-        "subtitle": "Estado SQL Server y bases de datos",
-        "prompt": (
-            "Ejecuta directamente el job template id={jt_sql_health} "
-            "(talento-sql-health) con extra_vars_json='{{}}'. Sintetiza SQL "
-            "Server, lista de databases con status, tier/SKU, tamano max."
-        ),
-        "expected_jt": JT_IDS["jt_sql_health"],
-        "renderer": "generic",
-        "pain_point": "Diagnostico foco-BD",
-        "card_class": "card-info",
-        "free_text": False,
-        "accepts_filters": [],
-        "tier": "secondary",
-    },
     "auto-remediate-restart": {
         "title": "Auto-Remediacion: Restart",
         "icon": "🔧",
@@ -406,11 +315,11 @@ SCENARIOS = {
         ),
         "expected_jt": JT_IDS["jt_aci_restart"],
         "renderer": "generic",
-        "pain_point": "Demo de auto-remediacion con safety guard",
+        "pain_point": "Auto-remediacion con safety guard SOX (dry-run + doble confirmacion)",
         "card_class": "card-warning",
         "free_text": False,
         "accepts_filters": [],
-        "tier": "secondary",
+        "tier": "primary",
     },
     "free-text": {
         "title": "Pregunta Libre",
@@ -419,13 +328,13 @@ SCENARIOS = {
         "prompt": None,  # se sustituye por el texto del usuario tal cual
         "expected_jt": None,
         "renderer": "generic",
-        "pain_point": "Flexibilidad operativa",
+        "pain_point": "Flexibilidad operativa — el agente combina tools",
         "card_class": "card-neutral",
         "free_text": True,
         "free_text_label": "Pregunta libre al agente",
         "free_text_placeholder": "Ej: ¿Cuantos eventos hubo en la ultima hora?",
         "accepts_filters": [],
-        "tier": "secondary",
+        "tier": "primary",
     },
 }
 
@@ -484,7 +393,11 @@ def resolve_prompt(
 
     if scenario["free_text"]:
         text = (free_text or "").strip()
-        if not text:
+        # Para escenarios con template que ACEPTAN input vacio (ej tlnt-explorer
+        # en modo ranking), permitimos texto vacio si el prompt es template.
+        # Sin template + texto vacio sigue siendo invalido (no hay prompt que
+        # mandar al agente).
+        if not text and not (scenario["prompt"] and "{user_input}" in scenario["prompt"]):
             return None
         # Si el prompt es template (tiene {user_input}), inyecta el texto
         if scenario["prompt"] and "{user_input}" in scenario["prompt"]:

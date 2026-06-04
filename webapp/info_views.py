@@ -266,10 +266,10 @@ def knowledge_file(file_id: str) -> Optional[dict]:
 
 
 # ============================================================================
-# Vista 5: Hallazgos EAPPS
+# Vista 5: Estado del ambiente
 # ============================================================================
 def eapps_findings() -> dict:
-    """Hallazgos con EAPPS — estado actualizado tras validacion empirica del workspace."""
+    """Estado del ambiente y bloqueos abiertos con el equipo de plataforma."""
     return {
         "status": "2 hallazgos ABIERTOS bloquean la demo SOX por usuario",
         "findings": [
@@ -319,7 +319,7 @@ def eapps_findings() -> dict:
                 "title": "Campo de identidad de usuario ausente en JSON de logs",
                 "severity": "media",
                 "summary": (
-                    "EAPPS habia confirmado que el JSON estructurado expone los "
+                    "Se habia confirmado que el JSON estructurado expondria los "
                     "campos `usuario` y `error_code`. Inspeccion empirica del "
                     "workspace en 168h (30,523 eventos JSON) muestra: "
                     "(a) el codigo TLNT vive en `codigo_error` (campo en ESPANOL, "
