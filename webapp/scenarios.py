@@ -198,29 +198,29 @@ SCENARIOS = {
     "sox-audit": {
         "title": "Auditoria SOX por Usuario",
         "icon": "🔐",
-        "subtitle": "Identidad estructurada del ambiente reconstruido (~3h)",
+        "subtitle": "Identidad y actividad reciente del usuario (~3h)",
         "prompt": (
-            "Audita la actividad del usuario '{user_input}' en el ambiente "
-            "reconstruido sobre las ultimas 3 horas (ventana del runtime).\n\n"
+            "Audita la actividad del usuario '{user_input}' en TALENTO en "
+            "las ultimas 3 horas.\n\n"
             "PASO 1: Llama a lookup_runtime_logs con modo='user_audit', "
-            "usuario='{user_input}', minutos=180. El bridge consulta el "
-            "runtime del ACI reconstruido directamente (schema enriquecido "
-            "con `usuario`, `error_code`, `correlation_id`). NO uses KQL.\n\n"
+            "usuario='{user_input}', minutos=180. La tool consulta "
+            "directamente la actividad reciente del sistema. NO uses KQL.\n\n"
             "PASO 2: Si la tool devuelve 0 filas, indica 'sin actividad de "
-            "{user_input} en el buffer de 3h' y sugiere validar el username "
-            "o probar con otro usuario.\n\n"
+            "{user_input} en las ultimas 3 horas' y sugiere validar el "
+            "username o probar con otro usuario.\n\n"
             "PASO 3: Si aparecen codigos TLNT, consulta file_search por cada "
             "codigo distinto para citar la definicion del catalogo.\n\n"
             "Sintetiza con enfasis SOX: total eventos, ratio errores/warns, "
             "codigos vistos con su definicion, primera y ultima actividad, "
             "loggers (controllers tocados), y un veredicto operacional "
             "(actividad normal / picos sospechosos / sin actividad). Incluye "
-            "una nota: 'ventana del runtime ~3h; para historico ampliar al "
-            "workspace cuando el pipeline este conectado'."
+            "una nota explicativa: 'analisis sobre actividad reciente de las "
+            "ultimas ~3 horas; para historico mas amplio se requiere consulta "
+            "al sistema de monitoreo'."
         ),
         "expected_jt": None,
-        "renderer": "generic",  # antes "sox" (artifacts AWX); ahora runtime bridge devuelve texto sintetizado
-        "pain_point": "Cumplimiento SOX por usuario con identidad estructurada (ambiente reconstruido)",
+        "renderer": "generic",  # antes "sox" (artifacts AWX); ahora devuelve texto sintetizado
+        "pain_point": "Cumplimiento SOX por usuario con identidad estructurada",
         "card_class": "card-info",
         "free_text": True,
         "free_text_label": "Usuario a auditar",
@@ -233,23 +233,24 @@ SCENARIOS = {
         "icon": "🛡️",
         "subtitle": "Usuarios con >=3 fallos de auth (TLNT-002/008/009/011)",
         "prompt": (
-            "Detecta usuarios con patron de fuerza bruta en el ambiente "
-            "reconstruido (ultimas 3h del runtime).\n\n"
+            "Detecta usuarios con patron de fuerza bruta en TALENTO "
+            "(ultimas 3 horas).\n\n"
             "PASO 1: Llama a lookup_runtime_logs con modo='brute_force', "
-            "usuario='', minutos=180. El bridge agrupa fallos de "
+            "usuario='', minutos=180. La tool agrupa fallos de "
             "autenticacion (TLNT-002 credenciales invalidas, TLNT-008 "
             "password incorrecta, TLNT-009 cuenta bloqueada, TLNT-011 "
             "intentos excedidos) por usuario con umbral >=3 fallos.\n\n"
-            "PASO 2: Si devuelve 0 filas, indica 'sin patrones de brute "
-            "force en el buffer de 3h con umbral >=3'.\n\n"
+            "PASO 2: Si devuelve 0 filas, indica 'sin patrones de fuerza "
+            "bruta en las ultimas 3 horas con umbral >=3'.\n\n"
             "PASO 3: Para cada usuario sospechoso, consulta file_search por "
             "los codigos TLNT involucrados para citar su definicion.\n\n"
             "Sintetiza: lista de usuarios sospechosos con severidad (HIGH "
             ">=10, MEDIUM >=5, LOW >=3), codigos involucrados, primera y "
             "ultima vez, recomendacion (bloqueo manual, notificacion a SOC, "
-            "auditoria forense via correlation_id). Incluye nota: 'ventana "
-            "del runtime ~3h; para deteccion historica ampliar al workspace "
-            "cuando el pipeline este conectado'."
+            "auditoria forense via correlation_id). Incluye nota explicativa: "
+            "'analisis sobre actividad reciente de las ultimas ~3 horas; para "
+            "deteccion historica mas amplia se requiere consulta al sistema "
+            "de monitoreo'."
         ),
         "expected_jt": None,
         "renderer": "generic",  # antes "brute-force" (artifacts AWX); ahora runtime bridge devuelve texto sintetizado

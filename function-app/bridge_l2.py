@@ -161,7 +161,7 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v16-runtime-bridge"  # v16: puente runtime al ACI 2 (lookup_runtime_logs). Helper fetch_aci_runtime_logs usa ContainerInstanceManagementClient con SP logssolution (Contributor en RG 2 ya asignado, 0 permisos adicionales). Aggregator en memoria con 4 modos: user_audit, top_users, top_codes, brute_force. Buffer ~2000 lineas / ~3h con JSON 100% parseable del schema enriquecido (campos `usuario`, `error_code`, `correlation_id` dedicados). Scenarios sox-audit + brute-force REACTIVADOS de pending->primary con prompts que llaman lookup_runtime_logs. user-activity sigue con Plan C (regex sobre workspace) para ventanas largas. system_instructions: REGLA DE FUENTE - "ambiente reconstruido/SOX/brute force/ultimas horas" -> runtime; "historico/dias/semanas" -> workspace. Solo queda performance-analysis en pending
+CATALOG_VERSION = "v17-lenguaje-neutro"  # v17: scrub de jerga interna en strings cliente-visibles (system_instructions, tool descriptions, scenarios prompts, emit source del timeline). "ambiente reconstruido" / "ACI 2" / "schema enriquecido" / "runtime" -> "TALENTO" / "actividad reciente" / "sistema de monitoreo". Regla nueva en system prompt para que el LLM NO mencione runtime/ACI/workspace/etc en su sintesis, use lenguaje de negocio. Mantengo intactos comentarios `#` Python y CATALOG_VERSION (metadato interno)
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -789,27 +789,28 @@ def build_system_instructions() -> str:
         "    mesa de ayuda, auditoria agregada, o cuando el operador pregunta "
         "    por un codigo especifico.\n\n"
         "1c. user_activity(usuario, time_range_hours): resumen de actividad de "
-        "    un usuario sobre el workspace de Log Analytics (recibe del "
-        "    ambiente productivo). Usa regex sobre `message` como fallback. "
-        "    Util cuando se requiere VENTANA LARGA (24-168h) pero sin schema "
-        "    enriquecido.\n\n"
-        "1d. lookup_runtime_logs(modo, usuario, minutos): PUENTE al runtime "
-        "    del ambiente reconstruido. Schema enriquecido (campos `usuario`, "
-        "    `error_code`, `correlation_id` ya estructurados). 4 modos: "
-        "    user_audit (con usuario), top_users, top_codes, brute_force. "
-        "    Buffer ~3h. PREFIRELA cuando el operador pida 'reciente', "
-        "    'ultimas horas', 'ahora mismo', auditoria SOX por usuario, o "
-        "    deteccion de brute force — los datos son del schema enriquecido "
-        "    y el campo usuario es dedicado, no extraido por regex.\n\n"
+        "    un usuario sobre el sistema de monitoreo persistente. Usa regex "
+        "    sobre `message` como fallback. Util cuando se requiere VENTANA "
+        "    LARGA (24-168h) y los logs ya pasaron al historico.\n\n"
+        "1d. lookup_runtime_logs(modo, usuario, minutos): consulta la "
+        "    actividad reciente de TALENTO directamente del sistema. "
+        "    Devuelve campos estructurados (`usuario`, `error_code`, "
+        "    `correlation_id`). 4 modos: user_audit (con usuario), top_users, "
+        "    top_codes, brute_force. Ventana ~3h. PREFIRELA cuando el operador "
+        "    pida 'reciente', 'ultimas horas', 'ahora mismo', auditoria SOX "
+        "    por usuario, o deteccion de fuerza bruta.\n\n"
         "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de "
         "    las 4 anteriores cubre el caso. Para correlation_id, codigos TLNT, "
-        "    actividad por usuario y operaciones sobre el ambiente reconstruido "
-        "    USA SIEMPRE la tool especializada.\n\n"
-        "**REGLA DE FUENTE**: Si el operador pide datos del 'ambiente "
-        "reconstruido', 'esquema enriquecido', 'auditoria SOX por usuario', "
-        "'brute force' o 'ultimos minutos/horas' -> usa lookup_runtime_logs. "
-        "Si pide historico (mas de 3h, dias, semanas) -> usa user_activity / "
-        "tlnt_explorer / lookup_correlation_id sobre workspace.\n\n"
+        "    actividad por usuario y operaciones de seguridad USA SIEMPRE la "
+        "    tool especializada.\n\n"
+        "**REGLA DE FUENTE**: Si el operador pide datos de actividad reciente "
+        "('ahora mismo', 'ultimos minutos/horas'), auditoria SOX por usuario, "
+        "o deteccion de fuerza bruta -> usa lookup_runtime_logs. Si pide "
+        "historico (mas de 3h, dias, semanas) -> usa user_activity / "
+        "tlnt_explorer / lookup_correlation_id sobre el monitoreo persistente. "
+        "**No menciones 'runtime', 'ACI', 'ambiente reconstruido', 'workspace' "
+        "ni 'schema enriquecido' en tus respuestas al usuario** — usa lenguaje "
+        "de negocio: 'actividad reciente', 'sistema de monitoreo', 'TALENTO'.\n\n"
         "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
         "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
         "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
@@ -1050,19 +1051,18 @@ TOOL_USER_ACTIVITY = FunctionTool(
 TOOL_RUNTIME_LOGS = FunctionTool(
     name="lookup_runtime_logs",
     description=(
-        "Consulta los logs DEL RUNTIME del ACI moderno (aci-centralecopetrol2) "
-        "via Azure ARM directamente. Buffer ~2000 lineas / ~3h de historia. "
-        "Trae JSON estructurado completo (`usuario`, `error_code`, "
-        "`correlation_id`, `level`, `logger_name`, `message`) — el schema "
-        "enriquecido del ambiente reconstruido. Tiene cuatro modos:\n"
+        "Consulta la actividad reciente de TALENTO directamente del sistema "
+        "(ventana ~3h). Devuelve JSON estructurado con campos `usuario`, "
+        "`error_code`, `correlation_id`, `level`, `logger_name`, `message`. "
+        "Cuatro modos:\n"
         "  - user_audit (requiere `usuario`): resumen agregado de actividad.\n"
         "  - top_users: top 10 usernames por frecuencia.\n"
         "  - top_codes: top 10 codigos TLNT por frecuencia.\n"
         "  - brute_force: usuarios con >=3 fallos de auth (TLNT-002/008/009/011).\n"
-        "Usala para auditoria SOX, deteccion de brute force, o cualquier "
-        "consulta operativa sobre el ambiente reconstruido. La ventana es "
-        "limitada (~3h) — para histories mas largos esperar al pipeline al "
-        "workspace de Log Analytics."
+        "Usala para auditoria SOX por usuario, deteccion de fuerza bruta, o "
+        "cualquier consulta operativa de actividad reciente. La ventana es "
+        "limitada a ~3h — para historico mas largo usar tools de monitoreo "
+        "persistente (user_activity, tlnt_explorer, lookup_correlation_id)."
     ),
     parameters={
         "type": "object",
@@ -1376,7 +1376,7 @@ def process_response_items(
                 _emit(emit, {
                     "type": "tool.runtime.fetch",
                     "hop": hop,
-                    "source": f"{ENV.get('ACI_NAME')} runtime buffer (~3h, schema enriquecido)",
+                    "source": "actividad reciente de TALENTO (~3h)",
                 })
                 t0 = time.time()
                 try:
