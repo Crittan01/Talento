@@ -1056,6 +1056,13 @@ body {
 .ecp-sidebar-card--info.is-active .ecp-sidebar-card__sub {
   color: var(--ecp-lime);
 }
+/* Fix: el titulo tiene color teal hardcoded (selector .ecp-sidebar-card__title)
+   que gana especificidad sobre el color: #fff heredado del padre .is-active,
+   dejando texto teal sobre fondo teal = invisible. Forzar blanco en is-active. */
+.ecp-sidebar-card--info.is-active .ecp-sidebar-card__title,
+.ecp-sidebar-card--info.is-active .ecp-sidebar-card__icon {
+  color: #fff;
+}
 
 /* ============================================================================
    Info view — contenedor principal cuando se abre una vista de info
