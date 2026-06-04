@@ -219,7 +219,7 @@ SCENARIOS = {
             "workspace cuando el pipeline este conectado'."
         ),
         "expected_jt": None,
-        "renderer": "sox",
+        "renderer": "generic",  # antes "sox" (artifacts AWX); ahora runtime bridge devuelve texto sintetizado
         "pain_point": "Cumplimiento SOX por usuario con identidad estructurada (ambiente reconstruido)",
         "card_class": "card-info",
         "free_text": True,
@@ -252,7 +252,7 @@ SCENARIOS = {
             "cuando el pipeline este conectado'."
         ),
         "expected_jt": None,
-        "renderer": "brute-force",
+        "renderer": "generic",  # antes "brute-force" (artifacts AWX); ahora runtime bridge devuelve texto sintetizado
         "pain_point": "Accesos no autorizados — TLNT-002/008/009/011 agrupados por usuario",
         "card_class": "card-critical",
         "free_text": False,

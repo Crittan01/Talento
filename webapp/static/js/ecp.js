@@ -360,16 +360,44 @@
       appendTimeline('info', '🔄', `Hop ${evt.hop} — el agente está razonando…`);
     }
     else if (t === 'tool.call') {
-      const niceArgs = evt.tool === 'query_log_analytics'
-        ? `<code>${escapeHtml(String(evt.args.query || '').slice(0, 200))}</code>`
-        : `template_id=<code>${evt.args.template_id}</code>`;
-      appendTimeline('kql', '🛠️', `Tool <strong>${evt.tool}</strong> → ${niceArgs}`);
+      const a = evt.args || {};
+      let niceArgs;
+      if (evt.tool === 'query_log_analytics') {
+        niceArgs = `<code>${escapeHtml(String(a.query || '').slice(0, 200))}</code>`;
+      } else if (evt.tool === 'run_awx_job_template') {
+        niceArgs = `template_id=<code>${escapeHtml(String(a.template_id ?? ''))}</code>`;
+      } else if (evt.tool === 'lookup_runtime_logs') {
+        const parts = [];
+        if (a.modo) parts.push(`modo=<code>${escapeHtml(String(a.modo))}</code>`);
+        if (a.usuario) parts.push(`usuario=<code>${escapeHtml(String(a.usuario))}</code>`);
+        if (a.minutos) parts.push(`minutos=<code>${a.minutos}</code>`);
+        niceArgs = parts.join(' ') || '<em>(sin args)</em>';
+      } else if (evt.tool === 'lookup_correlation_id') {
+        niceArgs = `correlation_id=<code>${escapeHtml(String(a.correlation_id || ''))}</code> ventana=<code>${a.time_range_hours || '?'}h</code>`;
+      } else if (evt.tool === 'tlnt_explorer') {
+        const c = a.codigo ? `codigo=<code>${escapeHtml(String(a.codigo))}</code>` : '<em>(ranking)</em>';
+        niceArgs = `${c} ventana=<code>${a.time_range_hours || '?'}h</code>`;
+      } else if (evt.tool === 'user_activity') {
+        niceArgs = `usuario=<code>${escapeHtml(String(a.usuario || ''))}</code> ventana=<code>${a.time_range_hours || '?'}h</code>`;
+      } else {
+        niceArgs = `<code>${escapeHtml(JSON.stringify(a).slice(0, 200))}</code>`;
+      }
+      appendTimeline('kql', '🛠️', `Tool <strong>${escapeHtml(evt.tool)}</strong> → ${niceArgs}`);
     }
     else if (t === 'tool.kql.done') {
       appendTimeline('kql', '✓', `KQL OK (${evt.elapsed_seconds}s) — ${evt.rows} filas`);
     }
     else if (t === 'tool.kql.error') {
       appendTimeline('error', '⚠️', `KQL ERROR (${evt.elapsed_seconds}s) — ${escapeHtml(evt.error || '')}`);
+    }
+    else if (t === 'tool.runtime.fetch') {
+      appendTimeline('kql', '📡', `Leyendo runtime: ${escapeHtml(evt.source || 'ambiente reconstruido')}`);
+    }
+    else if (t === 'tool.runtime.done') {
+      appendTimeline('kql', '✓', `Runtime OK (${evt.elapsed_seconds}s) — ${evt.rows} filas / ${evt.buffer_lineas} eventos en buffer`);
+    }
+    else if (t === 'tool.runtime.error') {
+      appendTimeline('error', '⚠️', `Runtime ERROR (${evt.elapsed_seconds}s) — ${escapeHtml(evt.error || '')}`);
     }
     else if (t === 'tool.awx.launched') {
       state.awxUrl = evt.awx_url;
