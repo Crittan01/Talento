@@ -1,12 +1,12 @@
 /* ============================================================================
-   renderers.js — Renderers especializados por tipo de resultado.
-   Cada uno recibe el dict de artifacts (set_stats del playbook) y devuelve
-   HTML que se inyecta en el panel derecho.
+   renderers.js v21 — Renderers por tipo de resultado.
+   - generic: fallback para todos los escenarios basados en síntesis del agente
+   - health: System Health con veredicto por capa (lookup_infrastructure + lookup_sql)
+   - errors / sox / brute-force: legacy AWX artifacts (mantenidos como referencia)
    ============================================================================ */
 
 const Renderers = {
 
-  // --- helpers compartidos ---
   _kpi(label, value) {
     return `<div class="ecp-kpi">
               <div class="ecp-kpi__value">${value ?? '—'}</div>
@@ -14,14 +14,27 @@ const Renderers = {
             </div>`;
   },
 
+  _sevBadge(sev) {
+    const map = {
+      HEALTHY:  'severity-good',
+      OK:       'severity-good',
+      DEGRADED: 'severity-warn',
+      WARNING:  'severity-warn',
+      CRITICAL: 'severity-critical',
+      UNKNOWN:  'severity-neutral',
+    };
+    const cls = map[(sev || '').toUpperCase()] || 'severity-neutral';
+    return `<span class="severity-badge ${cls}">${sev || 'N/A'}</span>`;
+  },
+
   _severityBadge(status, mapping) {
-    const cls = mapping[status] || 'severity-neutral';
+    const cls = mapping[(status || '').toUpperCase()] || 'severity-neutral';
     return `<span class="severity-badge ${cls}">${status || 'N/A'}</span>`;
   },
 
   _table(headers, rows, maxRows = 10) {
     if (!rows || rows.length === 0) {
-      return '<p style="color: var(--text-muted); font-style: italic;">Sin datos.</p>';
+      return '<p style="color:var(--text-muted);font-style:italic;">Sin datos.</p>';
     }
     const limited = rows.slice(0, maxRows);
     const head = headers.map(h => `<th>${h}</th>`).join('');
@@ -32,121 +45,131 @@ const Renderers = {
   },
 
   _escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   },
 
   _actions(awxUrl) {
     if (!awxUrl) return '';
     return `<div class="ecp-actions">
               <a href="${awxUrl}" target="_blank" class="ecp-btn">Ver job en AWX ↗</a>
-              <button class="ecp-btn ecp-btn--secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})">Volver arriba</button>
+              <button class="ecp-btn ecp-btn--secondary" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑ Arriba</button>
             </div>`;
   },
 
-  // --- snapshot (JT 48) ---
-  snapshot(a, awxUrl) {
-    const tablesRows = a.all_tables_summary || [];
+  // ── health (System Health — lookup_infrastructure + lookup_sql) ─────────────
+  health(a, awxUrl) {
+    // El agente devuelve síntesis en texto; los artifacts pueden tener datos
+    // parciales del ARM si el bridge expuso alguno. Este renderer muestra
+    // una vista estructurada si los artifacts tienen el campo overall_severity,
+    // sino cae a generic.
+    const overall = a.overall_severity || a.severity;
+    if (!overall) return this.generic(a, awxUrl);
+
+    const label = a.env_label || (a.target_env === 'v1' ? 'TALENTO v1 legacy' : 'TALENTO v2 activo');
+
+    const layerRows = [];
+    if (a.aci)        layerRows.push(['Container (ACI)',  a.aci.state || '?', a.aci.severity || '?', `restarts: ${a.aci.restart_count ?? '?'}`]);
+    if (a.appservice) layerRows.push(['App Service',      a.appservice.state || '?', a.appservice.severity || '?', a.appservice.availability_state || '?']);
+    if (a.storage)    layerRows.push(['Storage Accounts', `${a.storage.total ?? '?'} cuentas`, a.storage.severity || '?', `no-HTTPS: ${a.storage.non_compliant_https ?? 0}`]);
+    if (a.quotas)     layerRows.push(['Quotas vCPU',      a.quotas.quotas ? `${a.quotas.quotas[0]?.used ?? '?'}/${a.quotas.quotas[0]?.limit ?? '?'}` : '?', a.quotas.severity || '?', '']);
+
     return `
-      <h4 style="margin-top:0;">📊 Estado del Workspace</h4>
-      <div class="ecp-kpi-grid">
-        ${this._kpi('Tablas con datos', a.n_tables_with_data)}
-        ${this._kpi('Top tabla', this._escapeHtml(String(a.top_table_name || '—')))}
-        ${this._kpi('Filas en top tabla', a.top_table_rows)}
-        ${this._kpi('Rango (h)', a.time_range_hours)}
+      <div style="margin-bottom:12px;">
+        <h4 style="margin:0 0 4px;">🏥 System Health — ${this._escapeHtml(label)}</h4>
+        <p style="margin:0;">Veredicto global: ${this._sevBadge(overall)}</p>
       </div>
-      <h5>Tablas pobladas (descendente):</h5>
-      ${this._table(['Tabla', 'Registros'], tablesRows)}
+      ${layerRows.length > 0 ? `
+        <h5>Estado por capa</h5>
+        ${this._table(['Capa', 'Estado', 'Severidad', 'Detalle'], layerRows)}
+      ` : ''}
       ${this._actions(awxUrl)}
     `;
   },
 
-  // --- errors (JT 49) ---
+  // ── errors (legacy AWX artifacts — mantenido) ────────────────────────────────
   errors(a, awxUrl) {
-    const sevMap = {
-      'CRITICAL': 'severity-critical',
-      'WARN': 'severity-warn',
-      'OK': 'severity-good',
-    };
+    // Si no hay artifacts de AWX, caer a generic
+    if (!a || !a.severity_status) return this.generic(a, awxUrl);
+    const sevMap = { CRITICAL: 'severity-critical', WARN: 'severity-warn', OK: 'severity-good' };
     return `
-      <h4 style="margin-top:0;">🚨 Análisis de Errores & Warnings</h4>
-      <p>Estado: ${this._severityBadge(a.severity_status, sevMap)}</p>
+      <h4 style="margin-top:0;">🚨 Análisis de Errores</h4>
+      <p>${this._severityBadge(a.severity_status, sevMap)}</p>
       <div class="ecp-kpi-grid">
         ${this._kpi('Errores', a.total_errors)}
         ${this._kpi('Warnings', a.total_warnings)}
-        ${this._kpi('Containers afectados', (a.affected_containers || []).length)}
+        ${this._kpi('Containers', (a.affected_containers || []).length)}
         ${this._kpi('Rango (h)', a.time_range_hours)}
       </div>
-      <h5>Top 5 mensajes recurrentes:</h5>
-      ${this._table(['Mensaje (snippet)', 'Conteo'], (a.top_messages || []).map(r => [r[0], r[1]]))}
-      <h5>Containers afectados:</h5>
-      ${this._table(['Container', 'Eventos'], a.affected_containers || [])}
+      <h5>Top mensajes:</h5>
+      ${this._table(['Mensaje', 'Conteo'], (a.top_messages || []).map(r => [r[0], r[1]]))}
       ${this._actions(awxUrl)}
     `;
   },
 
-  // --- SOX audit (JT 50) ---
+  // ── sox (legacy AWX artifacts) ───────────────────────────────────────────────
   sox(a, awxUrl) {
-    const sevMap = {
-      'SECURITY_INCIDENT': 'severity-critical',
-      'AUDIT_REVIEW': 'severity-warn',
-      'NORMAL': 'severity-good',
-    };
+    if (!a || !a.audit_status) return this.generic(a, awxUrl);
+    const sevMap = { SECURITY_INCIDENT: 'severity-critical', AUDIT_REVIEW: 'severity-warn', NORMAL: 'severity-good' };
     return `
-      <h4 style="margin-top:0;">🔐 Auditoría SOX — TALENTO</h4>
-      <p>Estado: ${this._severityBadge(a.audit_status, sevMap)}</p>
+      <h4 style="margin-top:0;">🔐 Auditoría SOX</h4>
+      <p>${this._severityBadge(a.audit_status, sevMap)}</p>
       <div class="ecp-kpi-grid">
-        ${this._kpi('Eventos de login', a.total_login_events)}
+        ${this._kpi('Logins', a.total_login_events)}
         ${this._kpi('Usuarios únicos', a.unique_users)}
-        ${this._kpi('Acciones privilegiadas', a.total_privileged_actions)}
-        ${this._kpi('Incidentes seguridad BD', a.total_security_incidents)}
+        ${this._kpi('Acciones priv.', a.total_privileged_actions)}
+        ${this._kpi('Incidentes BD', a.total_security_incidents)}
       </div>
-      <h5>Actividad de login por usuario:</h5>
+      <h5>Actividad por usuario:</h5>
       ${this._table(['Usuario', 'Tipo', 'Eventos'], a.login_breakdown || [])}
-      <h5>Acciones privilegiadas:</h5>
-      ${this._table(['Acción', 'Rol', 'Conteo'], a.privileged_breakdown || [])}
-      <h5>Incidentes de seguridad BD (top):</h5>
-      ${this._table(['Mensaje', 'Ocurrencias'], (a.security_incidents || []).map(r => [r[0], r[1]]))}
       ${this._actions(awxUrl)}
     `;
   },
 
-  // --- Brute force (JT 51, formato similar a SOX) ---
+  // ── brute-force (legacy AWX artifacts) ──────────────────────────────────────
   'brute-force'(a, awxUrl) {
-    const sevMap = {
-      'HIGH': 'severity-critical',
-      'MEDIUM': 'severity-warn',
-      'LOW': 'severity-good',
-    };
+    if (!a || !a.bruteforce_severity) return this.generic(a, awxUrl);
+    const sevMap = { HIGH: 'severity-critical', MEDIUM: 'severity-warn', LOW: 'severity-good' };
     return `
-      <h4 style="margin-top:0;">🛡️ Detección de Brute Force</h4>
-      <p>Severidad: ${this._severityBadge(a.bruteforce_severity || 'LOW', sevMap)}</p>
+      <h4 style="margin-top:0;">🛡️ Detección Brute Force</h4>
+      <p>${this._severityBadge(a.bruteforce_severity || 'LOW', sevMap)}</p>
       <div class="ecp-kpi-grid">
-        ${this._kpi('Usuarios sospechosos', a.suspicious_users_count ?? 0)}
-        ${this._kpi('Failed logins totales', a.total_failed_logins ?? 0)}
-        ${this._kpi('Umbral configurado', a.failed_threshold)}
+        ${this._kpi('Sospechosos', a.suspicious_users_count ?? 0)}
+        ${this._kpi('Failed logins', a.total_failed_logins ?? 0)}
+        ${this._kpi('Umbral', a.failed_threshold)}
         ${this._kpi('Rango (h)', a.time_range_hours)}
       </div>
-      <h5>Usuarios con intentos fallidos:</h5>
-      ${this._table(['Usuario', 'Intentos fallidos'], a.suspicious_users || [])}
-      <h5>Top mensajes detectados:</h5>
-      ${this._table(['Mensaje (snippet)', 'Conteo'], (a.top_messages || []).map(r => [r[0], r[1]]))}
+      <h5>Usuarios sobre umbral:</h5>
+      ${this._table(['Usuario', 'Intentos'], a.suspicious_users || [])}
       ${this._actions(awxUrl)}
     `;
   },
 
-  // --- Generic / Pregunta libre ---
+  // ── snapshot (legacy AWX artifacts) ──────────────────────────────────────────
+  snapshot(a, awxUrl) {
+    if (!a || !a.n_tables_with_data) return this.generic(a, awxUrl);
+    return `
+      <h4 style="margin-top:0;">📊 Workspace Snapshot</h4>
+      <div class="ecp-kpi-grid">
+        ${this._kpi('Tablas con datos', a.n_tables_with_data)}
+        ${this._kpi('Top tabla', this._escapeHtml(String(a.top_table_name || '—')))}
+        ${this._kpi('Filas top tabla', a.top_table_rows)}
+        ${this._kpi('Rango (h)', a.time_range_hours)}
+      </div>
+      ${this._table(['Tabla', 'Registros'], a.all_tables_summary || [])}
+      ${this._actions(awxUrl)}
+    `;
+  },
+
+  // ── generic (todos los escenarios v21 basados en síntesis del agente) ─────────
   generic(a, awxUrl) {
+    // Sin artifacts AWX: el agente sintetiza en texto (renderResult agrega el bloque)
     if (!a || Object.keys(a).length === 0) {
-      return `<p style="color: var(--text-muted);">Sin artifacts estructurados — revisa el texto sintetizado por el agente.</p>${this._actions(awxUrl)}`;
+      return `<p style="color:var(--text-muted);font-style:italic;">Sin artifacts estructurados — revisa el texto sintetizado por el agente.</p>`;
     }
     const rows = Object.entries(a).map(([k, v]) => [
       k,
-      typeof v === 'object' ? JSON.stringify(v).slice(0, 200) : String(v).slice(0, 200)
+      typeof v === 'object' ? JSON.stringify(v).slice(0, 200) : String(v).slice(0, 200),
     ]);
-    return `
-      <h4 style="margin-top:0;">🤖 Resultado</h4>
-      ${this._table(['Campo', 'Valor'], rows, 30)}
-      ${this._actions(awxUrl)}
-    `;
+    return `<h4 style="margin-top:0;">🤖 Resultado</h4>${this._table(['Campo', 'Valor'], rows, 30)}${this._actions(awxUrl)}`;
   },
 };

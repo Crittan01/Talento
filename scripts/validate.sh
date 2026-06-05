@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# validate.sh — smoke tests pre-demo
-# Verifica: az login activo, AWX alcanzable, Foundry endpoint vivo, mock run OK.
+# validate.sh — smoke tests pre-demo (v21)
+# Verifica: .env OK, AWX alcanzable, Foundry token via SP, paquetes en venv, webapp importable.
 
 set -uo pipefail
 
@@ -11,6 +11,9 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+
+# Venv Python — requerido para todos los checks de Python
+PYTHON="/Ansible/agents/.venv/bin/python3"
 
 PASS=0
 FAIL=0
@@ -31,38 +34,75 @@ check() {
 echo "═══════════ talento-ecopetrol — validate.sh ═══════════"
 echo ""
 
-# 1. az login
-check "az CLI instalado" "command -v az"
-check "az account show (sin sudo)" "az account show"
-check "Tenant correcto (NTT DATA Colombia)" "az account show --query name --output tsv | grep -q 'Azure subscription'"
+# 1. .env
+check ".env existe y permisos 600"       "test -f .env && [ \$(stat -c '%a' .env) = '600' ]"
+check "AZURE_TENANT_ID en .env"          "test -n \"\${AZURE_TENANT_ID:-}\""
+check "AZURE_CLIENT_ID en .env"          "test -n \"\${AZURE_CLIENT_ID:-}\""
+check "AZURE_CLIENT_SECRET en .env"      "test -n \"\${AZURE_CLIENT_SECRET:-}\""
+check "AWX_TOKEN en .env"                "test -n \"\${AWX_TOKEN:-}\""
+check "TEAMS_WEBHOOK_URL en .env"        "test -n \"\${TEAMS_WEBHOOK_URL:-}\""
 
-# 2. .env
-check ".env existe y permisos 600" "test -f .env && [ \$(stat -c '%a' .env) = '600' ]"
-check "AZURE_TENANT_ID en .env" "test -n \"\${AZURE_TENANT_ID:-}\""
-check "AWX_TOKEN en .env" "test -n \"\${AWX_TOKEN:-}\""
-check "TEAMS_WEBHOOK_URL en .env" "test -n \"\${TEAMS_WEBHOOK_URL:-}\""
+# 2. AWX
+check "AWX reachable (${AWX_URL})"       "curl -ks -o /dev/null -w '%{http_code}' --connect-timeout 5 ${AWX_URL}/api/v2/ping/ | grep -q 200"
+check "AWX token valido"                 "curl -ks -H 'Authorization: Bearer ${AWX_TOKEN}' ${AWX_URL}/api/v2/me/ | ${PYTHON} -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get(\"count\",0)>0 else 1)'"
 
-# 3. AWX
-check "AWX reachable (https://192.168.250.20.nip.io)" "curl -ks -o /dev/null -w '%{http_code}' --connect-timeout 5 ${AWX_URL}/api/v2/ping/ | grep -q 200"
-check "AWX token valido" "curl -ks -H 'Authorization: Bearer ${AWX_TOKEN}' ${AWX_URL}/api/v2/me/ | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get(\"count\",0)>0 else 1)'"
+# 3. Foundry auth via SP (no requiere az login)
+check "Foundry token via SP"             "curl -s -X POST \
+  https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/token \
+  -d 'grant_type=client_credentials&client_id=${AZURE_CLIENT_ID}&client_secret=${AZURE_CLIENT_SECRET}&resource=https://ai.azure.com/' \
+  | ${PYTHON} -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get(\"access_token\") else 1)'"
 
-# 4. Foundry endpoint
-check "Foundry endpoint responde token request" "az account get-access-token --resource https://cognitiveservices.azure.com/ --query expiresOn -o tsv"
+# 4. ARM token via SP
+check "ARM token via SP"                 "curl -s -X POST \
+  https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/token \
+  -d 'grant_type=client_credentials&client_id=${AZURE_CLIENT_ID}&client_secret=${AZURE_CLIENT_SECRET}&resource=https://management.azure.com/' \
+  | ${PYTHON} -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get(\"access_token\") else 1)'"
 
-# 5. Python deps
-check "fastapi instalado" "python3 -c 'import fastapi'"
-check "uvicorn instalado" "python3 -c 'import uvicorn'"
-check "azure-ai-projects instalado" "python3 -c 'import azure.ai.projects'"
-check "azure-identity instalado" "python3 -c 'import azure.identity'"
-check "openai instalado" "python3 -c 'import openai'"
+# 5. Python deps (venv)
+check "fastapi instalado (venv)"         "${PYTHON} -c 'import fastapi'"
+check "uvicorn instalado (venv)"         "${PYTHON} -c 'import uvicorn'"
+check "azure-ai-projects instalado"      "${PYTHON} -c 'import azure.ai.projects'"
+check "azure-identity instalado"         "${PYTHON} -c 'import azure.identity'"
+check "azure-mgmt-containerinstance"     "${PYTHON} -c 'import azure.mgmt.containerinstance'"
+check "azure-monitor-query instalado"    "${PYTHON} -c 'import azure.monitor.query'"
+check "openai instalado"                 "${PYTHON} -c 'import openai'"
+check "requests instalado"               "${PYTHON} -c 'import requests'"
 
-# 6. Webapp importable
-check "webapp imports OK" "python3 -c 'from webapp import app, scenarios, mock_events, event_bus, bridge_runner'"
-check "bridge_l2 imports OK" "python3 -c 'import bridge_l2'"
-check "bridge_l2.run_cycle tiene emit param" "python3 -c 'import bridge_l2, inspect; assert \"emit\" in inspect.signature(bridge_l2.run_cycle).parameters'"
+# 6. Webapp importable (venv + rutas correctas)
+check "webapp imports OK"                "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp import app, scenarios, mock_events, event_bus, bridge_runner'"
+check "bridge_l2 imports OK"             "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2'"
+check "bridge_l2.run_cycle emit param"   "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2, inspect; assert \"emit\" in inspect.signature(bridge_l2.run_cycle).parameters'"
+check "bridge_l2 CATALOG_VERSION v21"    "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert bridge_l2.CATALOG_VERSION.startswith(\"v21\"), bridge_l2.CATALOG_VERSION'"
+check "bridge_l2 JT_IDS tiene 6 JTs"    "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert len(bridge_l2.JT_IDS)==6, len(bridge_l2.JT_IDS)'"
+check "lookup_infrastructure existe"     "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert callable(bridge_l2.lookup_infrastructure)'"
+check "lookup_sql existe"                "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert callable(bridge_l2.lookup_sql)'"
+check "detect_anomalies existe"          "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert callable(bridge_l2.detect_anomalies)'"
 
-# 7. Mock dataset completo
-check "mock_events tiene 6 escenarios" "python3 -c 'from webapp.mock_events import MOCK_SEQUENCES; assert len(MOCK_SEQUENCES)==6'"
+# 7. Scenarios v21
+check "scenarios tiene 13 escenarios"   "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import list_scenarios; assert len(list_scenarios())==13, len(list_scenarios())'"
+check "infra-health-check existe"        "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import get_scenario; assert get_scenario(\"infra-health-check\")'"
+check "sql absorbido en infra-health"    "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import get_scenario; assert get_scenario(\"sql-health\") is None, \"sql-health sigue separado\"'"
+check "anomaly-scan existe"              "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import get_scenario; assert get_scenario(\"anomaly-scan\")'"
+check "sql-diagnostics-enable existe"   "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import get_scenario; assert get_scenario(\"sql-diagnostics-enable\")'"
+check "nsg-block-ip existe"             "PYTHONPATH=.:function-app ${PYTHON} -c \
+  'from webapp.scenarios import get_scenario; assert get_scenario(\"nsg-block-ip\")'"
+check "RESOURCE_PROFILES v1/v2"          "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert set(bridge_l2.RESOURCE_PROFILES)=={\"v1\",\"v2\"}'"
+check "_get_profile() devuelve v2"       "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; p=bridge_l2._get_profile(\"v2\"); assert p[\"aci_name\"]==\"aci-centralecopetrol2\"'"
 
 echo ""
 echo "═══════════ Resumen ═══════════"
@@ -74,4 +114,4 @@ if [ "$FAIL" -gt 0 ]; then
   exit 1
 fi
 echo ""
-echo "✓ Todo OK — listo para 'make demo' o 'make mock'."
+echo "✓ Todo OK — listo para 'make demo-local' o 'make mock'."

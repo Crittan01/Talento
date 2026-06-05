@@ -13,7 +13,11 @@ C_RED    := \033[0;31m
 C_RESET  := \033[0m
 
 # Carga .env si existe (no pone los valores en make-vars, los pasa al shell)
-ENV_LOAD := if [ -f .env ]; then set -a; source .env; set +a; fi
+# REQUESTS_CA_BUNDLE  → azure-sdk / requests usan el CA bundle del sistema (OL9/RHEL)
+# SSL_CERT_FILE       → openai library (httpx) usa el mismo bundle
+ENV_LOAD := if [ -f .env ]; then set -a; source .env; set +a; fi; \
+            export REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; \
+            export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 .PHONY: help install dev demo mock cli test awx-sync awx-status inject-demo \
         stop clean rotate-secret-check repo-status pre-demo \
@@ -30,9 +34,13 @@ help:  ## Lista todos los targets disponibles
 	@echo ""
 
 install:  ## Instala/actualiza paquetes Python necesarios
-	pip3 install --user --upgrade \
+	pip install --upgrade \
 		fastapi uvicorn jinja2 \
-		azure-ai-projects azure-identity openai requests
+		"azure-ai-projects>=1.0.0b3" \
+		"azure-identity>=1.15.0" \
+		"azure-monitor-query>=1.2.0" \
+		"azure-mgmt-containerinstance>=10.0.0" \
+		openai requests
 	@echo ""
 	@printf "$(C_GREEN)✓ Dependencias instaladas$(C_RESET)\n"
 
@@ -43,6 +51,7 @@ dev:  ## Levanta dashboard en modo desarrollo (uvicorn --reload)
 	uvicorn webapp.app:app --host 0.0.0.0 --port 8000 --reload
 
 demo:  ## Levanta dashboard production-like (sin reload) para la presentacion
+	@fuser -k 8000/tcp 2>/dev/null && printf "$(C_YELLOW)⚑ Puerto 8000 liberado$(C_RESET)\n" || true
 	@$(ENV_LOAD); \
 	echo "$(C_CYAN)Dashboard listo para demo — http://localhost:8000$(C_RESET)"; \
 	echo "$(C_YELLOW)Ctrl+C para detener.$(C_RESET)"; \
@@ -73,9 +82,12 @@ awx-status:  ## Resumen del estado de AWX (projects, JTs, jobs recientes)
 inject-demo:  ## Inyecta datos sinteticos de brute force al workspace (opcional pre-demo)
 	@./scripts/inject-synthetic-bruteforce.sh
 
-stop:  ## Mata procesos uvicorn activos del dashboard
-	@if pkill -f "uvicorn webapp.app" 2>/dev/null; then \
-		printf "$(C_GREEN)✓ uvicorn detenido$(C_RESET)\n"; \
+stop:  ## Mata procesos uvicorn activos del dashboard (y libera el puerto 8000)
+	@killed=0; \
+	pkill -f "uvicorn webapp.app" 2>/dev/null && killed=1 || true; \
+	fuser -k 8000/tcp 2>/dev/null && killed=1 || true; \
+	if [ "$$killed" = "1" ]; then \
+		printf "$(C_GREEN)✓ Dashboard detenido$(C_RESET)\n"; \
 	else \
 		printf "$(C_YELLOW)No estaba corriendo$(C_RESET)\n"; \
 	fi

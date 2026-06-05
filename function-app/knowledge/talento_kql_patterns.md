@@ -235,115 +235,128 @@ Resultado esperado en operación normal: INFO >> WARN >> ERROR (ratio aprox 75/2
 
 ## Cuándo NO usar query_log_analytics
 
-- Para verificar estado actual de infraestructura (container Running/Stopped, App Service availability) → usar `run_awx_job_template` con los JTs de diagnóstico (36-39).
-- Para ejecutar acciones (restart, etc.) → usar `run_awx_job_template` con los JTs de remediación (40-43).
-- Para definiciones de códigos TLNT-XXX → buscar en `talento_error_catalog.md` del knowledge base.
+- Estado de infraestructura (container, App Service, Storage, Network, Quotas) → `lookup_infrastructure(mode=...)`.
+- Estado de SQL Servers y databases → `lookup_sql()`.
+- Detección de anomalías estadísticas → `detect_anomalies(metric_type, ...)`.
+- Actividad reciente (<3h): SOX, brute force → `lookup_runtime_logs(modo, ...)`.
+- Trazabilidad por correlation_id → `lookup_correlation_id(correlation_id, ...)`.
+- Análisis de códigos TLNT → `tlnt_explorer(codigo, ...)`.
+- Performance y dependencias → `lookup_app_insights(modo, ...)`.
+- Remediación invasiva → `run_awx_job_template(template_id, ...)`.
+- Definiciones de códigos TLNT-XXX → `file_search` en `talento_error_catalog.md`.
+
+`query_log_analytics` es el **escape hatch** para consultas que ninguna tool especializada cubre.
 
 ---
 
-## Patrón 11 — Actividad por usuario específico (NUEVO)
+## Nota — Queries por usuario (bloqueadas — Hallazgo EAPPS abierto)
 
-> ⚠️ **BLOQUEADO — Hallazgo 2 abierto**. Este patrón **NO funciona** con los logs
-> actuales porque el JSON estructurado no contiene campo `usuario` (verificado
-> sobre 30,523 eventos JSON en 168h). Documentado aquí como referencia para
-> cuando EAPPS instrumente el MDC. **No lo uses hasta entonces.** Para
-> investigación forense actual, usa correlation_id (patrón 3).
+El JSON estructurado de TALENTO **NO contiene** campo de identidad de usuario
+(`usuario`, `user`, `userName`, etc.). Verificado en 30,523 eventos / 168h.
+
+**Alternativas actuales:**
+- Actividad reciente por usuario → `lookup_runtime_logs(modo='user_audit', usuario='nvivas')` (buffer ACI ~3h)
+- Actividad histórica → `user_activity(usuario='nvivas', time_range_hours=24)` (extrae usuario del campo `message` con regex)
+- Brute force → `lookup_runtime_logs(modo='brute_force')` (agrupación por `usuario` en el buffer runtime)
+
+Cuando EAPPS instrumente el MDC de Logback, el campo `usuario` aparecerá en el JSON
+y estas queries KQL serán viables. Hasta entonces, NO escribir KQL que filtre por `usuario`.
+
+---
+
+## Patrones de Detección de Anomalías (v21)
+
+> **NOTA v21**: El agente NO debe escribir estas queries manualmente.
+> Usar la tool `detect_anomalies(metric_type, time_range_hours, bin_minutes)`.
+> El bridge construye y ejecuta la KQL automáticamente.
+> Estos patrones están aquí como referencia de lo que hace la tool internamente.
+
+### Patrón 15 — Anomalía en tasa de errores (error_rate)
+
+`detect_anomalies(metric_type='error_rate', time_range_hours=24, bin_minutes=10)`
 
 ```kql
 ContainerInstanceLog_CL
-| where TimeGenerated > ago(24h)
+| where TimeGenerated >= ago(24h)
 | extend p = parse_json(Message)
-| where tostring(p.usuario) == 'nvivas'   // FUTURO: cuando MDC esté instrumentado
-| project
-    TimeGenerated,
-    level = tostring(p.level),
-    codigo_error = tostring(p.codigo_error),
-    msg = tostring(p.message),
-    corr_id = tostring(p.correlation_id),
-    logger = tostring(p.logger_name)
-| order by TimeGenerated desc
-| take 50
+| where tostring(p.level) == 'ERROR'
+| make-series err_count=count() on TimeGenerated from ago(24h) to now() step 10m
+| extend (anomalies, scores, baseline) = series_decompose_anomalies(err_count, 1.5)
+| mv-expand TimeGenerated, err_count, anomalies, scores
+| where toint(anomalies) != 0
+| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')
+| project TimeGenerated, err_count=toint(err_count), anomaly_score=round(todouble(scores),1), direction
+```
+
+**SPIKE** = pico anormal de errores. **DIP** = caída anormal (posible pérdida de tráfico).
+Requiere ≥10 bins de datos (ventana mínima ~4h con bins de 10m).
+
+---
+
+### Patrón 16 — Anomalía en volumen de requests (request_volume)
+
+`detect_anomalies(metric_type='request_volume', time_range_hours=24, bin_minutes=10)`
+
+Fuente: tabla `AppRequests` en workspace 2 (`14135f7a-c66a-492c-8c8b-124cdea16c2d`).
+
+```kql
+AppRequests
+| where TimeGenerated >= ago(24h)
+| make-series req_count=count() on TimeGenerated from ago(24h) to now() step 10m
+| extend (anomalies, scores, baseline) = series_decompose_anomalies(req_count, 1.5)
+| mv-expand TimeGenerated, req_count, anomalies, scores
+| where toint(anomalies) != 0
+| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')
 ```
 
 ---
 
-## Patrón 12 — Detección de brute force por usuario (BLOQUEADO)
+### Patrón 17 — Anomalía en fallos de autenticación (auth_failures)
 
-> ⚠️ **BLOQUEADO — Hallazgo 2**. Mismo bloqueo que patrón 11: requiere campo
-> `usuario` que no existe. Alternativa actual: ver el **VOLUMEN** agregado de
-> TLNT-002/008/011 con patrón 4 (sin agrupar por usuario). Si el volumen tiene
-> pico, escalar a investigación manual cruzando correlation_id con Azure AD.
-
-Conteo de fallos de autenticación agrupados por usuario en una ventana. Los
-códigos relevantes son TLNT-002 (credenciales inválidas), TLNT-008 (password
-incorrecta) y TLNT-011 (intentos excedidos):
+`detect_anomalies(metric_type='auth_failures', time_range_hours=24, bin_minutes=10)`
 
 ```kql
 ContainerInstanceLog_CL
-| where TimeGenerated > ago(1h)
+| where TimeGenerated >= ago(24h)
 | extend p = parse_json(Message)
-| where tostring(p.codigo_error) in ('TLNT-002', 'TLNT-008', 'TLNT-011')
-| extend usuario = tostring(p.usuario)
-| where isnotempty(usuario)
-| summarize
-    fails = count(),
-    primer = min(TimeGenerated),
-    ultimo = max(TimeGenerated),
-    codes = make_set(tostring(p.codigo_error))
-    by usuario
-| where fails >= 5
-| order by fails desc
+| extend codigo = coalesce(tostring(p.codigo_error), extract('(TLNT-[0-9]+)', 1, Message))
+| where codigo in ('TLNT-002', 'TLNT-008', 'TLNT-009', 'TLNT-011')
+| make-series fail_count=count() on TimeGenerated from ago(24h) to now() step 10m
+| extend (anomalies, scores, baseline) = series_decompose_anomalies(fail_count, 1.5)
+| mv-expand TimeGenerated, fail_count, anomalies, scores
+| where toint(anomalies) != 0
+| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')
 ```
 
-Si `fails >= 5` por un usuario en ventana corta → posible brute force.
+Un SPIKE en auth_failures con alta frecuencia → correlacionar con `lookup_runtime_logs(modo='brute_force')`.
 
 ---
 
-## Patrón 13 — Auditoría SOX por usuario (BLOQUEADO)
+### Patrón 18 — SQL Diagnostic Queries (cuando Diagnostic Settings activos)
 
-> ⚠️ **BLOQUEADO — Hallazgo 2**. Idéntica situación: sin campo `usuario`, no
-> hay agrupación posible. Mantener este patrón aquí como referencia para
-> cuando se cierre el Hallazgo.
-
-Acciones críticas auditables agrupadas por usuario. Útil para certificación
-SOX y compliance:
+> Solo disponibles cuando SQL Server tiene Diagnostic Settings apuntando a Log Analytics.
+> La tool `lookup_sql()` los ejecuta automáticamente si hay datos.
 
 ```kql
-ContainerInstanceLog_CL
-| where TimeGenerated > ago(24h)
-| extend p = parse_json(Message)
-| where isnotempty(tostring(p.usuario))
-| extend usuario = tostring(p.usuario), msg = tostring(p.message)
-| extend tipo_accion = case(
-    msg has_cs "Login exitoso", "login_ok",
-    msg has_cs "Login fallido", "login_fail",
-    msg has_cs "Listando", "listing",
-    msg has_cs "Aprob", "aprobacion",
-    msg has_cs "Modific" or msg has_cs "Actualiz", "modificacion",
-    "otro"
-)
-| summarize total = count() by usuario, tipo_accion
-| order by usuario asc, tipo_accion asc
+// Slow queries (>1s, últimas 24h)
+AzureDiagnostics
+| where TimeGenerated >= ago(24h)
+| where Category == 'QueryStoreRuntimeStatistics'
+| extend duration_ms = todouble(max_duration_d) / 1000
+| where duration_ms > 1000
+| project TimeGenerated, database_s, query_hash_s, duration_ms, execution_count_d
+| order by duration_ms desc | take 10
+
+// Bloqueos
+AzureDiagnostics
+| where TimeGenerated >= ago(24h)
+| where Category == 'Blocks'
+| summarize count() by database_s, bin(TimeGenerated, 1h)
+
+// Deadlocks
+AzureDiagnostics
+| where TimeGenerated >= ago(24h)
+| where Category == 'Deadlocks'
+| summarize count() by database_s
 ```
-
----
-
-## Patrón 14 — Top usuarios por errores en ventana (BLOQUEADO)
-
-> ⚠️ **BLOQUEADO — Hallazgo 2**. Mismo motivo. Alternativa actual: top códigos
-> con patrón 4 (agrupado por código en lugar de por usuario).
-
-```kql
-ContainerInstanceLog_CL
-| where TimeGenerated > ago(24h)
-| extend p = parse_json(Message)
-| where tostring(p.level) == "ERROR" or tostring(p.level) == "WARN"
-| where isnotempty(tostring(p.usuario))
-| summarize
-    total_errores = count(),
-    distinct_codes = dcount(tostring(p.codigo_error)),
-    top_codes = make_set(tostring(p.codigo_error), 5)
-    by usuario = tostring(p.usuario)
-| order by total_errores desc
-| take 10
 ```

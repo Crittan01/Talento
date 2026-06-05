@@ -55,11 +55,10 @@ def _ensure_foundry_agent() -> None:
     try:
         import bridge_l2
         from azure.ai.projects import AIProjectClient
-        from azure.identity import DefaultAzureCredential
 
         project = AIProjectClient(
             endpoint=bridge_l2.PROJECT_ENDPOINT,
-            credential=DefaultAzureCredential(exclude_environment_credential=True),
+            credential=bridge_l2.get_azure_credential(),
         )
         # ¿El agente ya tiene versiones registradas? La SDK pide agent_name=
         # (no name=) — si se pasa mal cae a [] y siempre re-crea version.
@@ -187,6 +186,16 @@ async def api_run(payload: RunRequest):
             f"ejecutar todavia. Razon: {scenario.get('pending_eapps_reason', 'pendiente')}",
         )
 
+    # Validar free_text ANTES del split mock/real — aplica en ambos modos.
+    # resolve_prompt devuelve None si el escenario requiere free_text y no se dio.
+    prompt = resolve_prompt(
+        payload.scenario_id,
+        free_text=payload.free_text,
+        filters=payload.filters,
+    )
+    if prompt is None:
+        raise HTTPException(400, "Pregunta vacia o invalida (free_text requerido para este escenario)")
+
     # Modo mock: forzado por env var (FORCE_MOCK=1) o solicitado en el request
     use_mock = payload.mock or _force_mock()
 
@@ -194,24 +203,15 @@ async def api_run(payload: RunRequest):
         run_id = await bridge_runner.start_mock_run(payload.scenario_id, mock_events)
         return {"run_id": run_id, "mode": "mock"}
 
-    # Modo real: resuelve prompt con filtros y lanza el bridge
-    prompt = resolve_prompt(
-        payload.scenario_id,
-        free_text=payload.free_text,
-        filters=payload.filters,
-    )
-    if not prompt:
-        raise HTTPException(400, "Pregunta vacia (free_text requerido para free-text)")
-
-    # Los filtros del UI se pasan tambien como force_extra_vars para que el
-    # bridge los aplique en cada llamada a AWX, sobrescribiendo lo que el LLM
-    # proponga. Esto garantiza que el filtro elegido en la UI llega 100% a
-    # AWX aunque el modelo no respete el prompt al pie de la letra.
+    # Los filtros del UI se pasan como force_extra_vars.
+    # target_env ("v1"/"v2") controla qué instancia investigan las tools de infra.
+    filters = dict(payload.filters or {})
+    filters.setdefault("target_env", "v2")  # default: instancia activa
     run_id = await bridge_runner.start_run(
         user_question=prompt,
         no_setup=True,
         max_hops=8,
-        force_extra_vars=payload.filters or None,
+        force_extra_vars=filters,
     )
     return {"run_id": run_id, "mode": "real"}
 

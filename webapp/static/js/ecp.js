@@ -16,10 +16,12 @@
     startTime: null,
     elapsedTimer: null,
     forceMockUrlParam: new URLSearchParams(window.location.search).get('mock') === '1',
+    targetEnv: 'v2',      // instancia activa por default
+    activeScope: 'completo', // scope del health check
   };
 
   const el = {
-    cards: document.getElementById('cardsGrid'),
+    cards: document.getElementById('sidebar'),  // v21: cards dentro de groups, no de cardsGrid
     sidebar: document.getElementById('sidebar'),
     welcome: document.getElementById('welcome'),
     runBanner: document.getElementById('runBanner'),
@@ -38,45 +40,55 @@
     modalCancel: document.getElementById('freeTextCancelBtn'),
     modalCancelX: document.getElementById('freeTextCancel'),
     filterTimeRange: document.getElementById('filterTimeRange'),
-    filterThreshold: document.getElementById('filterThreshold'),
+    filterThreshold: document.getElementById('bruteThreshold'),   // embebido en card brute-force
     filterHint: document.getElementById('filterHint'),
     connStatus: document.getElementById('connStatus'),
     infoView: document.getElementById('infoView'),
     infoViewTitle: document.getElementById('infoViewTitle'),
     infoViewBody: document.getElementById('infoViewBody'),
     infoViewClose: document.getElementById('infoViewClose'),
+    instanceToggle: document.getElementById('instanceToggle'),
+    scopeGroup: document.getElementById('scopeGroup'),
+    scopeButtons: document.getElementById('scopeButtons'),
+    scopeRunBtn: document.getElementById('scopeRunBtn'),
+    timeRangeGroup: document.getElementById('timeRangeGroup'),
+    envBadge: document.getElementById('envBadge'),
+    timelineEnvBadge: document.getElementById('timelineEnvBadge'),
+    smartNav: document.getElementById('smartNav'),
+    smartNavButtons: document.getElementById('smartNavButtons'),
+    activeFiltersHint: document.getElementById('activeFiltersHint'),
+    modalTitle: document.getElementById('modalTitle'),
+    modalHint: document.getElementById('modalHint'),
   };
 
   // -------------------------------------------------------------------------
   // Filter bar — gestiona valores actuales y visibilidad del threshold
   // -------------------------------------------------------------------------
   function readFilters() {
-    // Defensivo: si algun elemento no existe en el DOM, usar default.
-    // Evita romper handlers cuando el template oculta un filtro inline.
+    // bruteThreshold se lee dinámicamente porque el DOM podría no estar listo aún
+    const bruteEl = document.getElementById('bruteThreshold');
     return {
       time_range_hours: el.filterTimeRange
         ? parseInt(el.filterTimeRange.value, 10) : 24,
-      failed_threshold: el.filterThreshold
-        ? parseInt(el.filterThreshold.value, 10) : 5,
+      failed_threshold: bruteEl ? parseInt(bruteEl.value, 10) : 5,
+      target_env: state.targetEnv,
+      scope: state.activeScope,
     };
   }
   function updateFilterHint() {
     if (!el.filterHint) return;
     const f = readFilters();
     el.filterHint.textContent =
-      `Filtro global: ${f.time_range_hours}h. Umbral brute-force: ${f.failed_threshold}.`;
+      `Instancia: ${f.target_env} · Últimas ${f.time_range_hours}h · Cambios aplican al próximo run.`;
   }
-  [el.filterTimeRange, el.filterThreshold].forEach(s => {
-    if (!s) return;
-    s.addEventListener('change', () => {
-      markCardsAsUsingFilters();
-      updateFilterHint();
-    });
+  [el.filterTimeRange].filter(Boolean).forEach(s => {
+    s.addEventListener('change', () => { markCardsAsUsingFilters(); updateFilterHint(); });
   });
 
   function markCardsAsUsingFilters() {
     const f = readFilters();
-    const isDefault = f.time_range_hours === 24 && f.failed_threshold === 5;
+    const isDefault = f.time_range_hours === 24;
+    if (!el.cards) return;
     el.cards.querySelectorAll('.ecp-sidebar-card').forEach(c => {
       const accepts = (c.dataset.acceptsFilters || '').split(',').filter(Boolean);
       c.dataset.filterActive = (!isDefault && accepts.length > 0) ? 'true' : 'false';
@@ -85,6 +97,88 @@
   // Inicial
   updateFilterHint();
   markCardsAsUsingFilters();
+
+  // -------------------------------------------------------------------------
+  // Instance toggle (v1/v2)
+  // -------------------------------------------------------------------------
+  if (el.instanceToggle) {
+    el.instanceToggle.addEventListener('click', (e) => {
+      const btn = e.target.closest('.ecp-instance-btn');
+      if (!btn) return;
+      const env = btn.dataset.env;
+      if (env === state.targetEnv) return;
+      state.targetEnv = env;
+      el.instanceToggle.querySelectorAll('.ecp-instance-btn').forEach(b =>
+        b.classList.toggle('ecp-instance-btn--active', b.dataset.env === env));
+      updateFilterHint();
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Scope buttons (health check)
+  // -------------------------------------------------------------------------
+  if (el.scopeButtons) {
+    el.scopeButtons.addEventListener('click', (e) => {
+      const btn = e.target.closest('.ecp-scope-btn');
+      if (!btn) return;
+      const scope = btn.dataset.scope;
+      state.activeScope = scope;
+      el.scopeButtons.querySelectorAll('.ecp-scope-btn').forEach(b =>
+        b.classList.toggle('ecp-scope-btn--active', b.dataset.scope === scope));
+    });
+  }
+
+  // Mostrar scope selector solo para el escenario infra-health-check
+  function updateScopeVisibility(scenarioId) {
+    if (!el.scopeGroup) return;
+    el.scopeGroup.style.display = scenarioId === 'infra-health-check' ? 'flex' : 'none';
+  }
+
+  // Actualizar visibilidad y hints según los filtros que acepta el escenario
+  const HINT_BY_SCENARIO = {
+    'sox-audit':          '⏱ Sin efecto — audita las últimas ~3h del sistema (tiempo real)',
+    'brute-force':        '⏱ Sin efecto — analiza las últimas ~3h del sistema (tiempo real)',
+    'infra-health-check': '⏱ Sin efecto — consulta el estado actual de Azure ARM (instantáneo)',
+    'auto-remediate-restart': '⏱ Sin efecto — acción sobre estado actual',
+    'free-text':          'Instancia activa: v' + (state.targetEnv || '2') + ' · El agente decide la ventana',
+  };
+
+  function updateFilterVisibility(scenarioId, acceptsFilters) {
+    const hasTime = (acceptsFilters || []).includes('time_range_hours');
+
+    // Dimear / activar el grupo de tiempo
+    if (el.timeRangeGroup) {
+      el.timeRangeGroup.classList.toggle('ecp-filterbar__group--inactive', !hasTime);
+      if (!hasTime) {
+        el.timeRangeGroup.setAttribute('title',
+          'Este escenario no usa ventana de tiempo — los datos provienen de otra fuente');
+      } else {
+        el.timeRangeGroup.removeAttribute('title');
+      }
+    }
+
+    // Hint contextual
+    if (el.filterHint) {
+      if (hasTime) {
+        const hrs = el.filterTimeRange ? el.filterTimeRange.value : 24;
+        el.filterHint.innerHTML =
+          `⏱ Ventana <strong>${hrs}h</strong> aplica · Instancia: <strong>${state.targetEnv}</strong>`;
+      } else {
+        el.filterHint.textContent =
+          HINT_BY_SCENARIO[scenarioId] ||
+          `Instancia: ${state.targetEnv} · El filtro de tiempo no aplica a este escenario`;
+      }
+    }
+  }
+
+  // Reset: vuelve al estado neutral (sin escenario seleccionado)
+  function resetFilterVisibility() {
+    if (el.timeRangeGroup) {
+      el.timeRangeGroup.classList.remove('ecp-filterbar__group--inactive');
+      el.timeRangeGroup.removeAttribute('title');
+    }
+    updateFilterHint();
+  }
 
   // -------------------------------------------------------------------------
   // Connection status — poll /healthz cada 15s
@@ -121,18 +215,8 @@
   // -------------------------------------------------------------------------
   // Card click handler
   // -------------------------------------------------------------------------
-  // Stop propagation en cualquier control de filtro inline dentro de las cards
-  // (evita que click en el dropdown de umbral dispare el escenario)
-  el.cards.addEventListener('click', (e) => {
-    if (e.target.closest('[data-stop-click="true"]')) {
-      e.stopPropagation();
-      return;
-    }
-  }, true);
-  // Bloquear tambien el change para el caso del select (dispara click en parent)
-  el.cards.addEventListener('change', (e) => {
-    if (e.target.closest('[data-stop-click="true"]')) e.stopPropagation();
-  }, true);
+  // data-stop-click="true" ya se chequea dentro del handler principal (line ~236).
+  // No se necesitan listeners en capture mode — causarían interferencia.
 
   el.cards.addEventListener('click', (e) => {
     const card = e.target.closest('.ecp-sidebar-card');
@@ -169,14 +253,30 @@
     const freeText = card.dataset.freeText === 'true';
     const freeTextLabel = card.dataset.freeTextLabel || 'Pregunta libre al agente';
     const freeTextPlaceholder = card.dataset.freeTextPlaceholder || 'Escribe tu pregunta...';
+    const acceptsFilters = (card.dataset.acceptsFilters || '').split(',').filter(Boolean);
+    updateScopeVisibility(sid);
+    updateFilterVisibility(sid, acceptsFilters);
 
     // Determinar qué filtros aplican a esta card
-    const acceptsFilters = (card.dataset.acceptsFilters || '').split(',').filter(Boolean);
     const allFilters = readFilters();
     const filters = {};
     acceptsFilters.forEach(f => {
       if (allFilters[f] != null) filters[f] = allFilters[f];
     });
+    // target_env siempre se incluye
+    filters.target_env = allFilters.target_env;
+
+    // infra-health-check: mostrar scope y esperar confirmación antes de correr
+    if (sid === 'infra-health-check') {
+      state._pendingHealthCard = card;
+      state._pendingHealthRenderer = renderer;
+      state._pendingHealthFilters = filters;
+      if (el.scopeRunBtn) el.scopeRunBtn.style.display = 'inline-block';
+      document.querySelectorAll('.ecp-sidebar-card.is-scope-pending')
+        .forEach(c => c.classList.remove('is-scope-pending'));
+      card.classList.add('is-scope-pending');
+      return;
+    }
 
     if (freeText) {
       openFreeTextModal(card, sid, renderer, filters, freeTextLabel, freeTextPlaceholder);
@@ -187,15 +287,35 @@
 
   el.panelClose.addEventListener('click', closePanel);
 
+  // Hover preview eliminado — la visibilidad de filtros se actualiza en click.
+
+  // scopeRunBtn — ejecuta infra-health-check con el scope y env seleccionados
+  if (el.scopeRunBtn) {
+    el.scopeRunBtn.addEventListener('click', () => {
+      if (!state._pendingHealthCard) return;
+      const card = state._pendingHealthCard;
+      const renderer = state._pendingHealthRenderer || 'health';
+      const filters = Object.assign({}, state._pendingHealthFilters || {}, {
+        scope: state.activeScope,
+        target_env: state.targetEnv,
+      });
+      card.classList.remove('is-scope-pending');
+      el.scopeRunBtn.style.display = 'none';
+      state._pendingHealthCard = null;
+      state._pendingHealthRenderer = null;
+      state._pendingHealthFilters = null;
+      runScenario(card, 'infra-health-check', renderer, null, filters);
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Free-text modal
   // -------------------------------------------------------------------------
   function openFreeTextModal(card, sid, renderer, filters, label, placeholder) {
     el.modalInput.value = '';
     el.modalInput.placeholder = placeholder || 'Escribe aqui...';
-    // Customizar label del modal segun el escenario
-    const modalHeader = el.modal.querySelector('.ecp-modal__header strong');
-    if (modalHeader && label) modalHeader.textContent = label;
+    if (el.modalTitle && label) el.modalTitle.textContent = label;
+    if (el.modalHint) el.modalHint.textContent = placeholder || 'Escribe una pregunta operativa.';
     el.modal.classList.add('is-open');
     el.modalInput.focus();
     state._pendingCard = card;
@@ -275,13 +395,33 @@
     el.runBannerIcon.textContent = cardIcon;
     el.runBannerTitle.textContent = cardTitle;
 
-    // Badge de filtros aplicados (solo si difieren de defaults)
+    // Badge de instancia activa
+    if (el.envBadge) {
+      el.envBadge.textContent = filters.target_env === 'v1' ? '🏛️ v1 legacy' : '⭐ v2 activo';
+      el.envBadge.className = `ecp-env-badge ecp-env-badge--${filters.target_env}`;
+      el.envBadge.style.display = 'inline-block';
+    }
+    if (el.timelineEnvBadge) {
+      el.timelineEnvBadge.textContent = filters.target_env === 'v1' ? 'v1' : 'v2';
+      el.timelineEnvBadge.className = `ecp-section-env ecp-section-env--${filters.target_env}`;
+    }
+
+    // Badge de filtros aplicados
     const filterStr = formatFiltersBadge(filters);
     if (filterStr) {
       el.filtersBadge.textContent = filterStr;
       el.filtersBadge.style.display = 'inline-block';
     } else {
       el.filtersBadge.style.display = 'none';
+    }
+
+    // Hint de filtros activos en el timeline
+    if (el.activeFiltersHint) {
+      const parts = [`Instancia: ${filters.target_env}`];
+      if (filters.scope && filters.scope !== 'completo') parts.push(`Alcance: ${filters.scope}`);
+      if (filters.time_range_hours && filters.time_range_hours !== 24) parts.push(`${filters.time_range_hours}h`);
+      el.activeFiltersHint.innerHTML = '⚙️ ' + parts.join(' · ');
+      el.activeFiltersHint.style.display = 'block';
     }
 
     el.timeline.innerHTML = '';
@@ -390,8 +530,30 @@
     else if (t === 'tool.kql.error') {
       appendTimeline('error', '⚠️', `KQL ERROR (${evt.elapsed_seconds}s) — ${escapeHtml(evt.error || '')}`);
     }
+    // --- ARM tools (lookup_infrastructure, lookup_sql) ---
+    else if (t === 'tool.arm.fetch') {
+      appendTimeline('kql', '🔌', `Consultando Azure ARM: ${escapeHtml(evt.source || 'infraestructura')}`);
+    }
+    else if (t === 'tool.arm.done') {
+      const sevBadge = evt.severity
+        ? `&nbsp;<strong class="sev-${(evt.severity || '').toLowerCase()}">${escapeHtml(evt.severity)}</strong>` : '';
+      appendTimeline('kql', '✓', `ARM OK (${evt.elapsed_seconds}s) — mode=${escapeHtml(evt.mode || evt.tool || '')}${sevBadge}`);
+    }
+    else if (t === 'tool.arm.error') {
+      appendTimeline('error', '⚠️', `ARM ERROR (${evt.elapsed_seconds}s) — ${escapeHtml(evt.error || '')}`);
+    }
+    // --- App Insights ---
+    else if (t === 'tool.ai.fetch') {
+      appendTimeline('kql', '📊', `App Insights: ${escapeHtml(evt.source || '')}`);
+    }
+    else if (t === 'tool.ai.done') {
+      appendTimeline('kql', '✓', `App Insights OK (${evt.elapsed_seconds}s) — ${evt.rows} filas`);
+    }
+    else if (t === 'tool.ai.error') {
+      appendTimeline('error', '⚠️', `App Insights ERROR (${evt.elapsed_seconds}s) — ${escapeHtml(evt.error || '')}`);
+    }
     else if (t === 'tool.runtime.fetch') {
-      appendTimeline('kql', '📡', `Leyendo runtime: ${escapeHtml(evt.source || 'ambiente reconstruido')}`);
+      appendTimeline('kql', '📡', `Leyendo runtime: ${escapeHtml(evt.source || 'actividad reciente del sistema')}`);
     }
     else if (t === 'tool.runtime.done') {
       appendTimeline('kql', '✓', `Runtime OK (${evt.elapsed_seconds}s) — ${evt.rows} filas / ${evt.buffer_lineas} eventos en buffer`);
@@ -495,8 +657,89 @@
         ${agentHtml}
       </div>
     `;
-    // Mostrar el wrapper del resultado (estaba oculto hasta agent.final)
     el.resultWrap.style.display = 'block';
+
+    // Smart navigation: extrae entidades del texto y genera botones de acción
+    buildSmartNav(finalText || '');
+  }
+
+  // -------------------------------------------------------------------------
+  // Smart navigation — extrae entidades del texto del agente y genera botones
+  // -------------------------------------------------------------------------
+  const UUID_RE = /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
+  const TLNT_RE = /\b(TLNT-\d{3})\b/g;
+  const USER_RE = /\b(nvivas|cmedina|jtorres|jparra|nadie-\d+)\b/gi;
+  const HIGH_RE = /\b(HIGH|CRITICAL|DEGRADED)\b/;
+
+  function buildSmartNav(text) {
+    if (!el.smartNav || !el.smartNavButtons) return;
+    const buttons = [];
+    const addedUUIDs = new Set();
+    const addedTLNTs = new Set();
+    const addedUsers = new Set();
+
+    // Correlation IDs
+    let m;
+    UUID_RE.lastIndex = 0;
+    while ((m = UUID_RE.exec(text)) !== null && addedUUIDs.size < 3) {
+      const id = m[1];
+      if (addedUUIDs.has(id)) continue;
+      addedUUIDs.add(id);
+      const short = id.slice(0, 8) + '…';
+      buttons.push({ label: `🔍 Trazar ${short}`, action: 'correlation-trace', value: id });
+    }
+
+    // TLNT codes
+    TLNT_RE.lastIndex = 0;
+    while ((m = TLNT_RE.exec(text)) !== null && addedTLNTs.size < 3) {
+      const code = m[1];
+      if (addedTLNTs.has(code)) continue;
+      addedTLNTs.add(code);
+      buttons.push({ label: `📚 Explorar ${code}`, action: 'tlnt-explorer', value: code });
+    }
+
+    // Usuarios conocidos
+    USER_RE.lastIndex = 0;
+    while ((m = USER_RE.exec(text)) !== null && addedUsers.size < 2) {
+      const user = m[1].toLowerCase();
+      if (addedUsers.has(user) || user.startsWith('nadie-')) continue;
+      addedUsers.add(user);
+      buttons.push({ label: `👤 Auditar ${user}`, action: 'sox-audit', value: user });
+      buttons.push({ label: `📊 Actividad ${user}`, action: 'user-activity', value: user });
+    }
+
+    // Severidad alta → brute force
+    if (HIGH_RE.test(text) && !addedUsers.size) {
+      buttons.push({ label: `🛡️ Verificar brute force`, action: 'brute-force', value: '' });
+    }
+
+    if (buttons.length === 0) {
+      el.smartNav.style.display = 'none';
+      return;
+    }
+
+    el.smartNavButtons.innerHTML = buttons.map(b =>
+      `<button class="ecp-smart-btn" data-action="${escapeHtml(b.action)}" data-value="${escapeHtml(b.value)}">${escapeHtml(b.label)}</button>`
+    ).join('');
+    el.smartNav.style.display = 'flex';
+
+    // Click handler — lanza el escenario relacionado con el valor pre-relleno
+    el.smartNavButtons.querySelectorAll('.ecp-smart-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        const value = btn.dataset.value;
+        const card = document.querySelector(`[data-scenario-id="${action}"]`);
+        if (!card) return;
+        const renderer = card.dataset.renderer || 'generic';
+        const filters = readFilters();
+        // Si el escenario acepta free_text, lanzarlo directamente con el valor
+        if (card.dataset.freeText === 'true' && value) {
+          runScenario(card, action, renderer, value, filters);
+        } else {
+          runScenario(card, action, renderer, null, filters);
+        }
+      });
+    });
   }
 
   function formatFiltersBadge(filters) {
@@ -570,7 +813,6 @@
 
   function closePanel() {
     finishRun();
-    // Volver al estado de bienvenida (el layout permanece estable)
     el.runBanner.style.display = 'none';
     el.timelineWrap.style.display = 'none';
     el.resultWrap.style.display = 'none';
@@ -578,7 +820,15 @@
     el.timeline.innerHTML = '';
     el.result.innerHTML = '';
     el.filtersBadge.style.display = 'none';
+    if (el.envBadge) el.envBadge.style.display = 'none';
+    if (el.smartNav) el.smartNav.style.display = 'none';
+    if (el.activeFiltersHint) el.activeFiltersHint.style.display = 'none';
+    if (el.scopeRunBtn) el.scopeRunBtn.style.display = 'none';
+    document.querySelectorAll('.ecp-sidebar-card.is-scope-pending')
+      .forEach(c => c.classList.remove('is-scope-pending'));
+    state._pendingHealthCard = null;
     state.activeCard = null;
+    resetFilterVisibility();
   }
 
   function escapeHtml(s) {

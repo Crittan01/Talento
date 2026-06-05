@@ -32,7 +32,7 @@
 
     target_ip:    "{{ source_ip | mandatory }}"
     nsg:          "{{ nsg_name | default('nsg_solucion_talento') }}"
-    nsg_rg:       "{{ resource_group | default('rg-central-solucion-talento2') }}"
+    nsg_rg:       "{{ resource_group | default('rg-central-solucion-talento') }}"
     priority:     "{{ rule_priority | default(110) | int }}"
     reason:       "{{ rule_reason | default('brute-force-detection') }}"
     is_dry_run:   "{{ dry_run | default(true) | bool }}"

@@ -52,6 +52,40 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 PROJECT_ENDPOINT = "https://aifoundry-is2.services.ai.azure.com/api/projects/proj-foundry-is2"
 MODEL_DEPLOYMENT = "talento-gpt4o"  # v7: gpt-4o full (mejor resistencia a jailbreaks vs gpt-4o-mini)
 
+# Perfiles de recursos por instancia de TALENTO (v2=activo, v1=legacy).
+# lookup_infrastructure, lookup_sql y execute_kql usan el perfil correcto
+# segun force_extra_vars["target_env"] que inyecta la UI.
+RESOURCE_PROFILES = {
+    "v2": {
+        "aci_name":                  "aci-centralecopetrol2",
+        "aci_rg":                    "rg-central-solucion-talento2",
+        "appservice_name":           "app-central-ecopetrol2",
+        "appservice_rg":             "rg-central-solucion-talento2",
+        "sql_rg":                    "rg-central-solucion-talento2",
+        "workspace_id":              "14135f7a-c66a-492c-8c8b-124cdea16c2d",
+        "workspace_id_appinsights":  "14135f7a-c66a-492c-8c8b-124cdea16c2d",
+        "app_insights_name":         "ai-central-ecopetrol2",
+        "app_insights_rg":           "rg-central-solucion-talento2",
+        "label":                     "TALENTO v2 (activo)",
+    },
+    "v1": {
+        "aci_name":                  "aci-centralecopetrol",
+        "aci_rg":                    "rg-central-solucion-talento",
+        "appservice_name":           "app-central-ecopetrol",
+        "appservice_rg":             "rg-central-solucion-talento",
+        "sql_rg":                    "rg-central-solucion-talento",
+        "workspace_id":              "9e0a97a6-6839-4507-aae4-e4d706d1c320",
+        "workspace_id_appinsights":  "9e0a97a6-6839-4507-aae4-e4d706d1c320",
+        "app_insights_name":         "ai-central-ecopetrol",
+        "app_insights_rg":           "rg-central-solucion-talento",
+        "label":                     "TALENTO v1 (legacy)",
+    },
+}
+
+def _get_profile(target_env: str = "v2") -> dict:
+    """Devuelve el perfil de recursos para la instancia solicitada."""
+    return RESOURCE_PROFILES.get(str(target_env).lower(), RESOURCE_PROFILES["v2"])
+
 # El .env vive en la raiz del proyecto (talento-ecopetrol/), un nivel arriba
 # de function-app/. En Azure Function no existe (todo en App Settings via
 # os.environ); en local la raiz del repo es la fuente de verdad.
@@ -87,20 +121,26 @@ ENV = load_env(ENV_PATH)
 def get_azure_credential():
     """Devuelve la credencial apropiada segun el entorno.
 
-    - En Azure Function CON AZURE_MI_CLIENT_ID: User Assigned MI (con client_id).
-    - En Azure Function SIN AZURE_MI_CLIENT_ID: System Assigned MI (default).
-    - En local: az login del usuario.
+    - Azure Function + AZURE_MI_CLIENT_ID  → User Assigned MI
+    - Azure Function sin MI client_id      → System Assigned MI
+    - Local con SP en .env                 → ClientSecretCredential
+      (SP logssolution requiere rol Azure AI Developer en proj-foundry-is2)
+    - Fallback                             → DefaultAzureCredential (az login)
     """
     in_function = bool(os.environ.get("FUNCTIONS_WORKER_RUNTIME"))
     if in_function:
         mi_client_id = os.environ.get("AZURE_MI_CLIENT_ID", "").strip()
         if mi_client_id:
-            # User Assigned MI con client_id explicito
             return ManagedIdentityCredential(client_id=mi_client_id)
-        # System Assigned MI (default cuando no se pasa client_id)
         return ManagedIdentityCredential()
-    # Local dev
-    return DefaultAzureCredential(exclude_environment_credential=True)
+    if ENV.get("AZURE_CLIENT_ID") and ENV.get("AZURE_CLIENT_SECRET") and ENV.get("AZURE_TENANT_ID"):
+        from azure.identity import ClientSecretCredential
+        return ClientSecretCredential(
+            tenant_id=ENV["AZURE_TENANT_ID"],
+            client_id=ENV["AZURE_CLIENT_ID"],
+            client_secret=ENV["AZURE_CLIENT_SECRET"],
+        )
+    return DefaultAzureCredential()
 
 
 # ============================================================================
@@ -108,21 +148,14 @@ def get_azure_credential():
 # alternar entre AWX local y AWX Azure).
 # ============================================================================
 JT_IDS = {
-    # Auditoria + analisis (los 4 originales)
-    "jt_workspace_snapshot": int(ENV.get("AWX_JT_WORKSPACE_SNAPSHOT", 32)),
-    "jt_errors_analysis":    int(ENV.get("AWX_JT_ERRORS_ANALYSIS", 33)),
-    "jt_sox_audit":          int(ENV.get("AWX_JT_SOX_AUDIT", 34)),
-    "jt_brute_force":        int(ENV.get("AWX_JT_BRUTE_FORCE", 35)),
-    # Diagnosticos no invasivos (Azure ARM API)
-    "jt_aci_state":          int(ENV.get("AWX_JT_ACI_STATE", 52)),
-    "jt_appservice_state":   int(ENV.get("AWX_JT_APPSERVICE_STATE", 53)),
-    "jt_sql_health":         int(ENV.get("AWX_JT_SQL_HEALTH", 54)),
-    "jt_full_health_check":  int(ENV.get("AWX_JT_FULL_HEALTH_CHECK", 55)),
-    # Remediaciones invasivas (dry_run=true por defecto a nivel playbook)
-    "jt_aci_restart":        int(ENV.get("AWX_JT_ACI_RESTART", 56)),
-    "jt_aci_stop":           int(ENV.get("AWX_JT_ACI_STOP", 57)),
-    "jt_aci_start":          int(ENV.get("AWX_JT_ACI_START", 58)),
-    "jt_appservice_restart": int(ENV.get("AWX_JT_APPSERVICE_RESTART", 59)),
+    # Remediaciones invasivas de compute
+    "jt_aci_restart":             int(ENV.get("AWX_JT_ACI_RESTART", 56)),
+    "jt_aci_stop":                int(ENV.get("AWX_JT_ACI_STOP", 57)),
+    "jt_aci_start":               int(ENV.get("AWX_JT_ACI_START", 58)),
+    "jt_appservice_restart":      int(ENV.get("AWX_JT_APPSERVICE_RESTART", 59)),
+    # Remediaciones de configuracion (dry_run=true por defecto)
+    "jt_sql_diagnostics_enable":  int(ENV.get("AWX_JT_SQL_DIAGNOSTICS_ENABLE", 61)),
+    "jt_nsg_block_ip":            int(ENV.get("AWX_JT_NSG_BLOCK_IP", 62)),
 }
 TEMPLATES_NEEDING_AZURE_CREDS = set(JT_IDS.values())
 
@@ -164,7 +197,13 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v20-correlation-dual"  # v20: lookup_correlation_id auto-enruta por formato del UUID. (a) UUID con guiones (Spring Boot correlation_id): busca en workspace legacy via ContainerInstanceLog_CL JSON; si vacio, fallback al buffer runtime ACI 2 (que sigue teniendo los UUIDs de Spring Boot frescos). (b) Hex 32 chars sin guiones (App Insights OperationId del Java agent): busca en union AppRequests/Dependencies/Traces/Exceptions del workspace 2 via OperationId. Hallazgo arquitectonico critico que motivo el cambio: los 2 sistemas de correlacion son paralelos (Spring Boot MDC genera UUID propio, AI Java agent genera OperationId hex propio, no se cruzan). Esto reemplaza el plan original de migrar workspace ID (no servia porque el formato de UUID es distinto). Nueva utility kql_operation_id_appinsights, _is_appinsights_operation_id, _search_correlation_in_runtime_buffer
+CATALOG_VERSION = "v21-infra-anomaly"
+# v21: lookup_infrastructure (ARM directo — ACI/AppService/Storage/Network/Quotas/Full,
+# reemplaza JTs 52-55), lookup_sql (ARM directo — SQL Servers + DBs + diagnostics KQL
+# cuando esten habilitados, reemplaza JT 54), detect_anomalies (series_decompose_anomalies
+# sobre error_rate/request_volume/auth_failures). AWX reducido a 4 JTs invasivos.
+# Teams notifications movidas al bridge via notify_teams_finding.
+# v20 base: lookup_correlation_id dual UUID/OperationId, 7 tools originales.
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -175,37 +214,34 @@ AGENT_NAME = "talento-triage-agent"
 
 DEMO_QUESTIONS = {
     "1": (
-        "Realiza un health check operativo de TALENTO: primero diagnostica si "
-        "hay errores recientes en el workspace, luego ejecuta el snapshot del "
-        f"runtime de automatizacion AWX (template_id={JT_IDS['jt_workspace_snapshot']}) "
-        "para verificar que tenemos via de diagnostico activa. Reporta los "
-        "dos resultados."
+        "Realiza un full health check de TALENTO: usa lookup_infrastructure "
+        "con mode='full' y resource_group='' para obtener el estado de ACI, "
+        "App Service, storage y quotas. Reporta veredicto global "
+        "(HEALTHY/DEGRADED/CRITICAL) y cualquier anomalia detectada."
     ),
     "2": (
-        "Ejecuta un snapshot completo del workspace de TALENTO via el job "
-        f"template AWX talento-workspace-snapshot (template_id={JT_IDS['jt_workspace_snapshot']}) "
-        "con rango de 24 horas. Cuando termine, sintetiza los hallazgos del "
-        "snapshot."
+        "Consulta el estado detallado de los SQL Servers de TALENTO usando "
+        "lookup_sql. Lista ambos servidores, todas las databases con status, "
+        "tier SKU y size GB. Indica si hay databases no-Online y sugiere accion."
     ),
     "3": (
-        f"Lanza el job template id {JT_IDS['jt_workspace_snapshot']} en AWX como prueba "
-        "de cable agente <-> runtime de automatizacion. Reporta job_id, "
-        "status y resumen del stdout."
+        "Detecta anomalias estadisticas en la tasa de errores de TALENTO en "
+        "las ultimas 24 horas: usa detect_anomalies con metric_type='error_rate' "
+        "y time_range_hours=24. Si hay SPIKEs, complementa con "
+        "detect_anomalies metric_type='auth_failures' para ver si los picos "
+        "coinciden con fallos de autenticacion."
     ),
     "4": (
-        "¿Tenemos errores o warnings significativos en TALENTO en las "
-        "ultimas 24 horas? Lanza el analisis especifico de errores via AWX "
-        f"(template_id={JT_IDS['jt_errors_analysis']}) y sintetiza los hallazgos: "
-        "cuantos eventos criticos, que containers estan afectados, y cuales "
-        "son los top mensajes recurrentes. Indica el nivel de severidad global."
+        "Analiza errores criticos de TALENTO en las ultimas 24 horas. "
+        "Consulta los top codigos TLNT via tlnt_explorer con codigo='' y "
+        "time_range_hours=24. Para los 3 codigos mas frecuentes, busca su "
+        "definicion en file_search y proporciona recomendaciones operativas."
     ),
     "5": (
-        "TALENTO es un sistema regulado por SOX. Necesito una auditoria de "
-        "actividad de las ultimas 24 horas: que usuarios han accedido, que "
-        "acciones privilegiadas se ejecutaron (aprobaciones, rol=LIDER, "
-        "consultas masivas), y si hay incidentes de seguridad a nivel BD "
-        f"(failed logins SQL, exceptions). Ejecuta el job template {JT_IDS['jt_sox_audit']} "
-        "(talento-sox-audit) y reporta los hallazgos con el audit_status."
+        "Audita la actividad SOX del usuario 'nvivas' en las ultimas 3 horas "
+        "usando lookup_runtime_logs con modo='user_audit'. Reporta total de "
+        "eventos, errores, warnings, codigos TLNT detectados y veredicto "
+        "(HIGH/MEDIUM/LOW risk score)."
     ),
 }
 
@@ -471,6 +507,182 @@ def kql_tlnt_explorer(codigo_filtro: str, time_range_hours: int) -> str:
 
 
 # ============================================================================
+# KQL builders para deteccion de anomalias estadisticas
+# ============================================================================
+
+def kql_anomaly_error_rate(time_range_hours: int, bin_minutes: int = 10) -> str:
+    """series_decompose_anomalies sobre tasa de ERROR en ContainerInstanceLog_CL."""
+    hours = max(4, min(int(time_range_hours or 24), 168))
+    bin_m = max(5, min(int(bin_minutes or 10), 60))
+    return (
+        f"ContainerInstanceLog_CL\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        "| where tostring(p.level) == 'ERROR'\n"
+        f"| make-series err_count=count() on TimeGenerated "
+        f"from ago({hours}h) to now() step {bin_m}m\n"
+        "| extend (anomalies, scores, baseline) = series_decompose_anomalies(err_count, 1.5)\n"
+        "| mv-expand TimeGenerated, err_count, anomalies, scores\n"
+        "| where toint(anomalies) != 0\n"
+        "| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')\n"
+        "| project TimeGenerated, err_count = toint(err_count), "
+        "anomaly_score = round(todouble(scores), 1), direction\n"
+        "| order by anomaly_score desc\n"
+        "| take 20"
+    )
+
+
+def kql_anomaly_request_volume(time_range_hours: int, bin_minutes: int = 10) -> str:
+    """series_decompose_anomalies sobre volumen de requests en AppRequests (workspace 2)."""
+    hours = max(4, min(int(time_range_hours or 24), 168))
+    bin_m = max(5, min(int(bin_minutes or 10), 60))
+    return (
+        f"AppRequests\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        f"| make-series req_count=count() on TimeGenerated "
+        f"from ago({hours}h) to now() step {bin_m}m\n"
+        "| extend (anomalies, scores, baseline) = series_decompose_anomalies(req_count, 1.5)\n"
+        "| mv-expand TimeGenerated, req_count, anomalies, scores\n"
+        "| where toint(anomalies) != 0\n"
+        "| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')\n"
+        "| project TimeGenerated, req_count = toint(req_count), "
+        "anomaly_score = round(todouble(scores), 1), direction\n"
+        "| order by anomaly_score desc\n"
+        "| take 20"
+    )
+
+
+def kql_anomaly_auth_failures(time_range_hours: int, bin_minutes: int = 10) -> str:
+    """series_decompose_anomalies sobre fallos de auth TLNT-002/008/009/011."""
+    hours = max(4, min(int(time_range_hours or 24), 168))
+    bin_m = max(5, min(int(bin_minutes or 10), 60))
+    return (
+        f"ContainerInstanceLog_CL\n"
+        f"| where TimeGenerated >= ago({hours}h)\n"
+        "| extend p = parse_json(Message)\n"
+        "| extend codigo = coalesce(tostring(p.codigo_error), "
+        "extract('(TLNT-[0-9]+)', 1, Message))\n"
+        "| where codigo in ('TLNT-002', 'TLNT-008', 'TLNT-009', 'TLNT-011')\n"
+        f"| make-series fail_count=count() on TimeGenerated "
+        f"from ago({hours}h) to now() step {bin_m}m\n"
+        "| extend (anomalies, scores, baseline) = series_decompose_anomalies(fail_count, 1.5)\n"
+        "| mv-expand TimeGenerated, fail_count, anomalies, scores\n"
+        "| where toint(anomalies) != 0\n"
+        "| extend direction = iff(toint(anomalies) > 0, 'SPIKE', 'DIP')\n"
+        "| project TimeGenerated, fail_count = toint(fail_count), "
+        "anomaly_score = round(todouble(scores), 1), direction\n"
+        "| order by anomaly_score desc\n"
+        "| take 20"
+    )
+
+
+def detect_anomalies(
+    metric_type: str,
+    time_range_hours: int = 24,
+    bin_minutes: int = 10,
+    emit: Optional[Callable[[dict], None]] = None,
+    target_env: str = "v2",
+) -> dict:
+    """Detecta anomalias estadisticas en series temporales de TALENTO.
+
+    metric_types: error_rate | request_volume | auth_failures
+    Devuelve anomalias con timestamp, valor, score y direccion (SPIKE/DIP).
+    Requiere >=10 bins de datos para resultados fiables (ventana minima ~4h con bins 10m).
+    """
+    import time as _t
+    t0 = _t.time()
+    hrs = max(4, min(int(time_range_hours or 24), 168))
+    bins = max(5, min(int(bin_minutes or 10), 60))
+    profile = _get_profile(target_env)
+    ws_override = None
+
+    if metric_type == "error_rate":
+        query = kql_anomaly_error_rate(hrs, bins)
+        ws_override = profile["workspace_id"]
+    elif metric_type == "request_volume":
+        query = kql_anomaly_request_volume(hrs, bins)
+        ws_override = profile["workspace_id_appinsights"]
+    elif metric_type == "auth_failures":
+        query = kql_anomaly_auth_failures(hrs, bins)
+        ws_override = profile["workspace_id"]
+    else:
+        return {"error": f"metric_type '{metric_type}' no valido. Usa: error_rate, request_volume, auth_failures"}
+
+    try:
+        r = execute_kql(query, workspace_id=ws_override)
+    except Exception as exc:
+        return {"error": str(exc), "metric_type": metric_type}
+
+    if "error" in r:
+        msg = str(r["error"])
+        if "series must have at least" in msg.lower() or "not enough data" in msg.lower():
+            return {
+                "metric_type": metric_type, "anomaly_count": 0, "anomalies": [],
+                "has_spikes": False, "has_dips": False,
+                "summary": (
+                    f"Datos insuficientes para analisis estadistico con ventana "
+                    f"{hrs}h y bins de {bins}m. Ampliar la ventana temporal o reducir bin_minutes."
+                ),
+                "elapsed_seconds": round(_t.time() - t0, 1),
+            }
+        return {"error": msg, "metric_type": metric_type}
+
+    anomalies = r.get("data", [])
+    spikes = [a for a in anomalies if a.get("direction") == "SPIKE"]
+    dips = [a for a in anomalies if a.get("direction") == "DIP"]
+    count = len(anomalies)
+
+    if count == 0:
+        summary = f"Sin anomalias detectadas en la metrica '{metric_type}' en las ultimas {hrs}h. La serie es estable."
+    else:
+        summary = (
+            f"{count} anomalia(s) detectada(s) en '{metric_type}' "
+            f"en las ultimas {hrs}h: {len(spikes)} SPIKE(s), {len(dips)} DIP(s). "
+            f"Score maximo: {max(abs(a.get('anomaly_score', 0)) for a in anomalies):.1f}."
+        )
+
+    result = {
+        "metric_type": metric_type,
+        "time_range_hours": hrs,
+        "bin_minutes": bins,
+        "anomaly_count": count,
+        "anomalies": anomalies,
+        "has_spikes": bool(spikes),
+        "has_dips": bool(dips),
+        "summary": summary,
+        "elapsed_seconds": round(_t.time() - t0, 1),
+        "workspace_used": ws_override or ENV.get("LOG_ANALYTICS_WORKSPACE_ID", ""),
+    }
+
+    # Auto-notificar Teams cuando hay SPIKEs detectados
+    if spikes:
+        try:
+            max_score = max(abs(a.get("anomaly_score", 0)) for a in spikes)
+            sev = "HIGH" if max_score >= 3 else "MEDIUM"
+            notify_teams_finding(
+                title=f"TALENTO — Anomalía detectada: {metric_type}",
+                subtitle=f"{len(spikes)} SPIKE(s) en las últimas {hrs}h · score máx {max_score:.1f}",
+                severity=sev,
+                facts=[
+                    {"title": "Métrica", "value": metric_type},
+                    {"title": "SPIKEs", "value": str(len(spikes))},
+                    {"title": "DIPs", "value": str(len(dips))},
+                    {"title": "Ventana", "value": f"{hrs}h"},
+                ],
+                sections=[
+                    {"heading": "Resumen", "items": [summary]},
+                ],
+                actions=[
+                    {"title": "Ver en dashboard", "url": "http://localhost:8000/?scenario=anomaly-scan"},
+                ],
+            )
+        except Exception as _exc:
+            print(f"     ⚠ notify_teams_finding (anomaly) fallo: {_exc}")
+
+    return result
+
+
+# ============================================================================
 # Runtime logs bridge (puente temporal al ACI 2 mientras EAPPS conecta el
 # pipeline diagnostics.logAnalytics). Lee directo del runtime via ARM
 # (containers.list_logs) — buffer de ~2000 lineas / ~3h de historia, JSON
@@ -498,6 +710,419 @@ def _get_aci_client():
             subscription_id=ENV["AZURE_SUBSCRIPTION_ID"],
         )
     return _ACI_CLIENT_CACHE[key]
+
+
+# ============================================================================
+# ARM REST helpers — token + lookup_infrastructure + lookup_sql
+# ============================================================================
+_ARM_TOKEN_CACHE: dict = {}
+
+
+def _get_arm_token() -> str:
+    """Token OAuth2 para Azure ARM REST API. Cached ~55 min (expira en 60m)."""
+    import time as _time
+    cached = _ARM_TOKEN_CACHE.get("token")
+    expires = _ARM_TOKEN_CACHE.get("expires_at", 0)
+    if cached and _time.time() < expires:
+        return cached
+    resp = requests.post(
+        f"https://login.microsoftonline.com/{ENV['AZURE_TENANT_ID']}/oauth2/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": ENV["AZURE_CLIENT_ID"],
+            "client_secret": ENV["AZURE_CLIENT_SECRET"],
+            "resource": "https://management.azure.com/",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    token = resp.json()["access_token"]
+    _ARM_TOKEN_CACHE["token"] = token
+    _ARM_TOKEN_CACHE["expires_at"] = _time.time() + 3300
+    return token
+
+
+def _arm_get(path: str, api_version: str) -> dict:
+    """GET a ARM REST API. Devuelve el JSON parseado o {"error": ...}."""
+    ca = os.environ.get("REQUESTS_CA_BUNDLE")
+    try:
+        token = _get_arm_token()
+        r = requests.get(
+            f"https://management.azure.com{path}?api-version={api_version}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+            verify=ca if ca else True,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _sev(val: str) -> int:
+    return {"HEALTHY": 0, "DEGRADED": 1, "CRITICAL": 2}.get(val, 0)
+
+
+def lookup_infrastructure(
+    mode: str,
+    resource_group: str = "",
+    emit: Optional[Callable[[dict], None]] = None,
+    target_env: str = "v2",
+) -> dict:
+    """Consulta directa al Azure ARM API para estado de infraestructura TALENTO.
+
+    Modes: aci, appservice, storage, network, quotas, full.
+    target_env: "v2" (activo, default) o "v1" (legacy).
+    Devuelve dict estructurado con severity por componente y (en mode=full)
+    veredicto global HEALTHY/DEGRADED/CRITICAL.
+    """
+    import time as _t
+    t0 = _t.time()
+    sub = ENV.get("AZURE_SUBSCRIPTION_ID", "")
+    profile = _get_profile(target_env)
+    rg = (resource_group or "").strip() or profile["aci_rg"]
+    result: dict = {"mode": mode, "resource_group": rg, "target_env": target_env, "env_label": profile["label"]}
+
+    def _aci():
+        name = profile["aci_name"] or ENV.get("ACI_NAME", "")
+        aci_rg = profile["aci_rg"] or rg
+        if not name:
+            return {"error": "ACI_NAME no configurado"}
+        d = _arm_get(
+            f"/subscriptions/{sub}/resourceGroups/{aci_rg}/providers"
+            f"/Microsoft.ContainerInstance/containerGroups/{name}",
+            "2023-05-01",
+        )
+        if "error" in d:
+            return d
+        p = d.get("properties", {})
+        iv = p.get("instanceView", {})
+        containers = p.get("containers", [{}])
+        restart_count = sum(
+            c.get("properties", {}).get("instanceView", {}).get("restartCount", 0)
+            for c in containers
+        )
+        events = iv.get("events", [])
+        last_event = events[-1] if events else {}
+        state = iv.get("state", "Unknown")
+        sev = "CRITICAL" if state in ("Terminated", "Failed") else (
+            "DEGRADED" if restart_count > 3 else "HEALTHY"
+        )
+        image = containers[0].get("properties", {}).get("image", "?") if containers else "?"
+        return {
+            "name": name, "state": state, "restart_count": restart_count,
+            "image": image,
+            "last_event_type": last_event.get("type", ""),
+            "last_event_message": last_event.get("message", ""),
+            "severity": sev,
+        }
+
+    def _appservice():
+        name = profile["appservice_name"] or ENV.get("APPSERVICE_NAME", "")
+        app_rg = profile["appservice_rg"] or ENV.get("APPSERVICE_RESOURCE_GROUP", rg)
+        if not name:
+            return {"error": "APPSERVICE_NAME no configurado"}
+        d = _arm_get(
+            f"/subscriptions/{sub}/resourceGroups/{app_rg}/providers"
+            f"/Microsoft.Web/sites/{name}",
+            "2022-03-01",
+        )
+        if "error" in d:
+            return d
+        p = d.get("properties", {})
+        state = p.get("state", "Unknown")
+        avail = p.get("availabilityState", "Unknown")
+        sev = "CRITICAL" if state not in ("Running",) else (
+            "DEGRADED" if avail != "Normal" else "HEALTHY"
+        )
+        return {
+            "name": name, "state": state, "availability_state": avail,
+            "default_hostname": p.get("defaultHostName", ""),
+            "last_modified": (p.get("lastModifiedTimeUtc", "") or "")[:19],
+            "severity": sev,
+        }
+
+    def _storage():
+        d = _arm_get(
+            f"/subscriptions/{sub}/providers/Microsoft.Storage/storageAccounts",
+            "2023-01-01",
+        )
+        if "error" in d:
+            return d
+        accounts = []
+        non_compliant = 0
+        for s in d.get("value", []):
+            p = s.get("properties", {})
+            https_only = bool(p.get("supportsHttpsTrafficOnly", True))
+            if not https_only:
+                non_compliant += 1
+            accounts.append({
+                "name": s.get("name"),
+                "kind": s.get("kind"),
+                "https_only": https_only,
+                "sku": s.get("sku", {}).get("name"),
+            })
+        sev = "CRITICAL" if non_compliant > 0 else "HEALTHY"
+        return {
+            "accounts": accounts,
+            "total": len(accounts),
+            "non_compliant_https": non_compliant,
+            "severity": sev,
+        }
+
+    def _network():
+        issues = []
+        all_rules = []
+        for target_rg in {rg, ENV.get("APPSERVICE_RESOURCE_GROUP", rg)}:
+            if not target_rg:
+                continue
+            d = _arm_get(
+                f"/subscriptions/{sub}/resourceGroups/{target_rg}/providers"
+                f"/Microsoft.Network/networkSecurityGroups",
+                "2023-05-01",
+            )
+            for nsg in d.get("value", []):
+                p = nsg.get("properties", {})
+                for rule in p.get("securityRules", []):
+                    rp = rule.get("properties", {})
+                    src = rp.get("sourceAddressPrefix", "")
+                    if rp.get("access") == "Allow" and src in ("*", "0.0.0.0/0", "Internet"):
+                        issues.append(f"NSG {nsg.get('name')} regla {rule.get('name')}: Allow {rp.get('direction')} desde {src}")
+                    all_rules.append({
+                        "nsg": nsg.get("name"),
+                        "rule": rule.get("name"),
+                        "direction": rp.get("direction"),
+                        "access": rp.get("access"),
+                        "priority": rp.get("priority"),
+                        "dest_port": rp.get("destinationPortRange", "*"),
+                        "source": src,
+                    })
+        sev = "DEGRADED" if issues else "HEALTHY"
+        return {"rules": all_rules, "open_access_issues": issues, "severity": sev}
+
+    def _quotas():
+        location = ENV.get("AZURE_LOCATION", "centralus")
+        d = _arm_get(
+            f"/subscriptions/{sub}/providers/Microsoft.Compute/locations/{location}/usages",
+            "2023-07-01",
+        )
+        if "error" in d:
+            return d
+        relevant = []
+        for u in d.get("value", []):
+            name = u.get("name", {}).get("localizedValue", "")
+            curr = u.get("currentValue", 0)
+            limit = u.get("limit", 1)
+            pct = round(curr / limit * 100, 1) if limit else 0
+            if any(k in name.lower() for k in ["vcpu", "core", "container"]):
+                relevant.append({"resource": name, "used": curr, "limit": limit, "pct": pct})
+        over_80 = [r for r in relevant if r["pct"] >= 80]
+        sev = "CRITICAL" if any(r["pct"] >= 95 for r in relevant) else (
+            "DEGRADED" if over_80 else "HEALTHY"
+        )
+        return {"quotas": relevant, "over_80pct": over_80, "severity": sev}
+
+    if mode == "aci":
+        result.update(_aci())
+    elif mode == "appservice":
+        result.update(_appservice())
+    elif mode == "storage":
+        result.update(_storage())
+    elif mode == "network":
+        result.update(_network())
+    elif mode == "quotas":
+        result.update(_quotas())
+    elif mode == "full":
+        aci_r = _aci()
+        app_r = _appservice()
+        sto_r = _storage()
+        quo_r = _quotas()
+        result["aci"] = aci_r
+        result["appservice"] = app_r
+        result["storage"] = sto_r
+        result["quotas"] = quo_r
+        sevs = [
+            aci_r.get("severity", "HEALTHY"),
+            app_r.get("severity", "HEALTHY"),
+            sto_r.get("severity", "HEALTHY"),
+            quo_r.get("severity", "HEALTHY"),
+        ]
+        worst = max(sevs, key=_sev)
+        result["overall_severity"] = worst
+        result["severity"] = worst
+    else:
+        result["error"] = f"mode '{mode}' no reconocido. Validos: aci, appservice, storage, network, quotas, full"
+
+    result["elapsed_seconds"] = round(_t.time() - t0, 1)
+
+    # Auto-notificar Teams si hay DEGRADED o CRITICAL
+    try:
+        sev = result.get("severity") or result.get("overall_severity", "HEALTHY")
+        if sev in ("DEGRADED", "CRITICAL"):
+            facts = []
+            sections_data = []
+            if mode == "full":
+                for comp in ("aci", "appservice", "storage", "quotas"):
+                    comp_r = result.get(comp, {})
+                    comp_sev = comp_r.get("severity", "HEALTHY")
+                    if comp_sev != "HEALTHY":
+                        facts.append({"title": comp.upper(), "value": f"{comp_sev} — ver detalle"})
+            elif mode == "aci":
+                facts.append({"title": "State", "value": result.get("state", "?")})
+                facts.append({"title": "Restarts", "value": str(result.get("restart_count", 0))})
+            elif mode == "appservice":
+                facts.append({"title": "State", "value": result.get("state", "?")})
+                facts.append({"title": "Availability", "value": result.get("availability_state", "?")})
+            elif mode == "storage":
+                nc = result.get("non_compliant_https", 0)
+                facts.append({"title": "Non-HTTPS accounts", "value": str(nc)})
+            notify_teams_finding(
+                title=f"TALENTO Infrastructure — {sev} ({mode})",
+                subtitle=f"Detectado por lookup_infrastructure mode={mode}",
+                severity=sev,
+                facts=facts or [{"title": "Mode", "value": mode}],
+                sections=sections_data,
+                actions=[{"title": "Ver en dashboard", "url": "http://localhost:8000/?scenario=infra-health-check"}],
+            )
+    except Exception as _exc:
+        print(f"     ⚠ notify_teams_finding (infra) fallo (no rompe el flow): {_exc}")
+
+    return result
+
+
+def lookup_sql(
+    emit: Optional[Callable[[dict], None]] = None,
+    target_env: str = "v2",
+) -> dict:
+    """Consulta el estado de los SQL Servers de TALENTO via ARM + KQL diagnostics.
+
+    target_env: "v2" (activo, default) o "v1" (legacy).
+    Retorna estado ARM de ambos servidores y sus databases. Si AzureDiagnostics
+    tiene datos de SQL (diagnostic settings habilitados), agrega slow queries,
+    bloqueos y deadlocks sin requerir cambio de codigo.
+    """
+    import time as _t
+    t0 = _t.time()
+    profile = _get_profile(target_env)
+    sub = ENV.get("AZURE_SUBSCRIPTION_ID", "")
+
+    # 1. Listar SQL Servers — filtrar por RG del perfil seleccionado
+    d = _arm_get(f"/subscriptions/{sub}/providers/Microsoft.Sql/servers", "2021-11-01")
+    if "error" in d:
+        return {"error": d["error"], "elapsed_seconds": round(_t.time() - t0, 1)}
+    target_rg = profile["sql_rg"]
+
+    servers = []
+    overall_sev = "HEALTHY"
+    for srv in [s for s in d.get("value", []) if s["id"].split("/resourceGroups/")[1].split("/")[0] == target_rg]:
+        srv_rg = srv["id"].split("/resourceGroups/")[1].split("/")[0]
+        srv_name = srv.get("name", "")
+        srv_state = srv.get("properties", {}).get("state", "Unknown")
+        fqdn = srv.get("properties", {}).get("fullyQualifiedDomainName", "")
+
+        # Databases del servidor
+        db_data = _arm_get(
+            f"/subscriptions/{sub}/resourceGroups/{srv_rg}/providers"
+            f"/Microsoft.Sql/servers/{srv_name}/databases",
+            "2021-11-01",
+        )
+        databases = []
+        has_offline = False
+        for db in db_data.get("value", []):
+            db_props = db.get("properties", {})
+            db_status = db_props.get("status", "Unknown")
+            db_sku = db.get("sku", {})
+            max_bytes = db_props.get("maxSizeBytes", 0)
+            max_gb = round(max_bytes / 1073741824, 1) if max_bytes else 0
+            if db_status != "Online" and db.get("name") != "master":
+                has_offline = True
+            databases.append({
+                "name": db.get("name"),
+                "status": db_status,
+                "tier": db_sku.get("tier", ""),
+                "sku": db_sku.get("name", ""),
+                "max_gb": max_gb,
+            })
+
+        srv_sev = "CRITICAL" if srv_state != "Ready" or has_offline else "HEALTHY"
+        if _sev(srv_sev) > _sev(overall_sev):
+            overall_sev = srv_sev
+
+        servers.append({
+            "name": srv_name,
+            "resource_group": srv_rg,
+            "state": srv_state,
+            "fqdn": fqdn,
+            "databases": databases,
+            "severity": srv_sev,
+        })
+
+    # 2. Diagnostics KQL — slow queries / bloqueos / deadlocks (si hay datos)
+    diagnostics = {"available": False}
+    ws1 = profile["workspace_id"] or ENV.get("LOG_ANALYTICS_WORKSPACE_ID", "")
+    if ws1:
+        q_diag = (
+            "AzureDiagnostics "
+            "| where TimeGenerated >= ago(1h) "
+            "| where ResourceType contains 'SQL' "
+            "| summarize count() by Category "
+            "| limit 5"
+        )
+        r_diag = execute_kql(q_diag)
+        if r_diag.get("rows", 0) > 0:
+            diagnostics["available"] = True
+            # Slow queries (top 5 en 24h)
+            q_slow = (
+                "AzureDiagnostics "
+                "| where TimeGenerated >= ago(24h) "
+                "| where Category == 'QueryStoreRuntimeStatistics' "
+                "| extend duration_ms = todouble(max_duration_d) / 1000 "
+                "| where duration_ms > 1000 "
+                "| project TimeGenerated, database_s, query_hash_s, "
+                "  duration_ms, execution_count_d "
+                "| order by duration_ms desc "
+                "| take 5"
+            )
+            r_slow = execute_kql(q_slow)
+            diagnostics["slow_queries"] = r_slow.get("data", [])
+            # Bloqueos
+            q_blocks = (
+                "AzureDiagnostics "
+                "| where TimeGenerated >= ago(24h) "
+                "| where Category == 'Blocks' "
+                "| summarize count() by database_s, bin(TimeGenerated, 1h) "
+                "| order by TimeGenerated desc | take 10"
+            )
+            r_blocks = execute_kql(q_blocks)
+            diagnostics["blocks_24h"] = r_blocks.get("data", [])
+            # Deadlocks
+            q_dead = (
+                "AzureDiagnostics "
+                "| where TimeGenerated >= ago(24h) "
+                "| where Category == 'Deadlocks' "
+                "| summarize count() by database_s "
+                "| order by count_ desc"
+            )
+            r_dead = execute_kql(q_dead)
+            diagnostics["deadlocks_24h"] = r_dead.get("data", [])
+        else:
+            diagnostics["note"] = (
+                "AzureDiagnostics sin datos SQL. Para activar: Azure Portal → "
+                "sqlserver-ecopetrol → Monitoring → Diagnostic settings → "
+                "habilitar QueryStoreRuntimeStatistics/Blocks/Deadlocks → "
+                "Send to Log Analytics workspace law-central-soluciontalento2."
+            )
+
+    return {
+        "servers": servers,
+        "server_count": len(servers),
+        "overall_severity": overall_sev,
+        "severity": overall_sev,
+        "diagnostics": diagnostics,
+        "target_env": target_env,
+        "env_label": profile["label"],
+        "elapsed_seconds": round(_t.time() - t0, 1),
+    }
 
 
 def fetch_aci_runtime_logs(tail: int = 2000, since_minutes: Optional[int] = None) -> list:
@@ -830,14 +1455,15 @@ def _get_logs_query_client():
     return _AI_CLIENT_CACHE[key]
 
 
-def _ai_resource_id() -> str:
+def _ai_resource_id(target_env: str = "v2") -> str:
+    profile = _get_profile(target_env)
     sub = ENV["AZURE_SUBSCRIPTION_ID"]
-    rg = ENV.get("APP_INSIGHTS_RESOURCE_GROUP", "rg-central-solucion-talento2")
-    name = ENV.get("APP_INSIGHTS_NAME", "ai-central-ecopetrol2")
+    rg = profile["app_insights_rg"] or ENV.get("APP_INSIGHTS_RESOURCE_GROUP", "rg-central-solucion-talento2")
+    name = profile["app_insights_name"] or ENV.get("APP_INSIGHTS_NAME", "ai-central-ecopetrol2")
     return f"/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Insights/components/{name}"
 
 
-def query_app_insights(modo: str, time_range_hours: int = 1) -> dict:
+def query_app_insights(modo: str, time_range_hours: int = 1, target_env: str = "v2") -> dict:
     """Consulta el componente AI Classic con KQL por modo predefinido.
     Modos:
       - top_endpoints: top URLs por volumen + P50/P95 + tasa de exito
@@ -897,7 +1523,7 @@ def query_app_insights(modo: str, time_range_hours: int = 1) -> dict:
         client = _get_logs_query_client()
         from azure.monitor.query import LogsQueryStatus
         response = client.query_resource(
-            _ai_resource_id(),
+            _ai_resource_id(target_env),
             query,
             timespan=timedelta(hours=hours),
         )
@@ -1167,26 +1793,41 @@ def build_system_instructions() -> str:
         "    errors_5xx, slow_deps, top_exceptions, throughput. USALA cuando "
         "    el operador pida analisis de performance, latencia, RCA de "
         "    lentitud, errores HTTP, dependencias lentas o excepciones.\n\n"
+        "1f. lookup_infrastructure(mode, resource_group): estado de infraestructura "
+        "    Azure via ARM directo en <5s. Modes: aci, appservice, storage, "
+        "    network, quotas, full. USALA para cualquier pregunta de estado de "
+        "    componentes: 'container running?', 'App Service disponible?', "
+        "    'storage compliance', 'NSG rules', 'quotas'. Mode 'full' da veredicto "
+        "    global HEALTHY/DEGRADED/CRITICAL. Notifica Teams si hay problema.\n\n"
+        "1g. lookup_sql(): estado de SQL Servers + todas las databases via ARM. "
+        "    Lista AMBOS servidores: status, tier SKU, size GB. Si los Diagnostic "
+        "    Settings estan activos, agrega slow queries/bloqueos/deadlocks. "
+        "    USALA para: 'estado SQL', 'la BD esta sana', 'databases online'.\n\n"
+        "1h. detect_anomalies(metric_type, time_range_hours, bin_minutes): detecta "
+        "    anomalias estadisticas (series_decompose_anomalies). Metrics: "
+        "    error_rate, request_volume, auth_failures. USALA para: "
+        "    'comportamiento anormal', 'spike de errores', 'caida de trafico', "
+        "    'patron inusual de auth'. Ventana minima 4h, bins>=5m.\n\n"
         "1z. query_log_analytics(query): ESCAPE HATCH solo cuando ninguna de "
-        "    las 5 anteriores cubre el caso.\n\n"
-        "**REGLA DE FUENTE**: Si el operador pide datos de actividad reciente "
-        "('ahora mismo', 'ultimos minutos/horas'), auditoria SOX por usuario, "
-        "o deteccion de fuerza bruta -> usa lookup_runtime_logs. Si pide "
-        "historico (mas de 3h, dias, semanas) -> usa user_activity / "
-        "tlnt_explorer / lookup_correlation_id sobre el monitoreo persistente. "
-        "**No menciones 'runtime', 'ACI', 'ambiente reconstruido', 'workspace' "
-        "ni 'schema enriquecido' en tus respuestas al usuario** — usa lenguaje "
-        "de negocio: 'actividad reciente', 'sistema de monitoreo', 'TALENTO'.\n\n"
-        "2. run_awx_job_template(template_id, extra_vars_json): ejecuta un Job "
-        "   Template en AWX. Hay 12 JTs disponibles agrupados en: analisis de "
-        "   logs, diagnostico de infraestructura (no invasivos) y remediacion "
-        "   (invasivos con dry_run por defecto). ANTES de elegir un JT, usa "
-        "   file_search con 'catalogo JT TALENTO' — hay descripcion completa "
-        "   de cada uno, sus IDs, cuando usarlo, inputs y outputs.\n\n"
+        "    las tools anteriores cubre el caso.\n\n"
+        "**REGLA DE FUENTE**:\n"
+        "- INFRAESTRUCTURA (ACI, App Service, Storage, Network, Quotas) -> lookup_infrastructure\n"
+        "- SQL / BASES DE DATOS -> lookup_sql\n"
+        "- ANOMALIAS / PICOS / COMPORTAMIENTO ANORMAL -> detect_anomalies\n"
+        "- ACTIVIDAD RECIENTE (<3h): SOX, brute force -> lookup_runtime_logs\n"
+        "- HISTORICO (>3h): usuario, correlacion, TLNT -> user_activity / "
+        "tlnt_explorer / lookup_correlation_id\n"
+        "- REMEDIACION INVASIVA (restart/stop/start) -> run_awx_job_template\n"
+        "**No menciones 'runtime', 'ACI', 'workspace' ni 'ARM' en tus respuestas** "
+        "— usa lenguaje de negocio: 'sistema TALENTO', 'infraestructura', 'base de datos'.\n\n"
+        "2. run_awx_job_template(template_id, extra_vars_json): SOLO para "
+        "   remediaciones invasivas (restart/stop/start de ACI o App Service). "
+        "   4 JTs disponibles. Para diagnostico de infra usa lookup_infrastructure. "
+        "   Para estado SQL usa lookup_sql. Para logs usa las tools de logs.\n\n"
         "3. file_search: knowledge base TALENTO. Contiene:\n"
         "   - Catalogo de codigos TLNT-XXX (15 codes con descripcion y solucion)\n"
         "   - Guia de patrones KQL para logs TALENTO\n"
-        "   - Catalogo descriptivo de los 12 Job Templates\n"
+        "   - Catalogo descriptivo de los 4 Job Templates de remediacion\n"
         "   - Runbook operacional con procedimientos para casos tipicos\n\n"
         "PROTOCOLO (en orden):\n\n"
         "A. ANTES de actuar: identifica el escenario y consulta el runbook via "
@@ -1199,26 +1840,28 @@ def build_system_instructions() -> str:
         "D. CODIGOS TLNT-XXX: SIEMPRE busca su definicion en file_search antes "
         "   de citarla. NO inventes. Si el codigo no esta en el catalogo, "
         "   indicalo explicitamente y sugiere validar con EAPS.\n\n"
-        "E. REMEDIACION (restart/stop/start): primero diagnostica el estado "
-        "   actual con el JT correspondiente. Luego propone la accion en "
-        "   dry_run=true. NUNCA pases dry_run=false sin confirmacion EXPLICITA "
-        "   del operador en una segunda solicitud con intent claro ('ejecuta de "
-        "   verdad', 'confirmo', equivalente). Doble pista obligatoria.\n\n"
-        "F. ANTES de invocar run_awx_job_template, verifica que la accion "
-        "   solicitada corresponda a uno de los 12 JTs del catalogo (IDs "
-        "   32-43). Acciones NO soportadas que requieren rechazo INMEDIATO "
-        "   sin llamar AWX:\n"
-        "   - Detener/iniciar/restart de la BASE DE DATOS / SQL Server / "
-        "     Azure SQL Database (NO confundir con detener el CONTAINER que "
-        "     SI tiene JT 41 aci-stop; si dice 'BD' o 'base de datos' o 'SQL' "
-        "     se refiere al SQL Server, NO al container).\n"
-        "   - Borrar logs / delete logs / borrar en Log Analytics.\n"
+        "E. REMEDIACION (restart/stop/start): PRIMERO diagnostica el estado "
+        "   actual con lookup_infrastructure (mode='aci' o mode='appservice') "
+        "   o lookup_sql segun corresponda. DESPUES propone la accion con "
+        "   run_awx_job_template en dry_run=true. NUNCA pases dry_run=false "
+        "   sin confirmacion EXPLICITA del operador en una segunda solicitud "
+        "   con intent claro ('ejecuta de verdad', 'confirmo', equivalente). "
+        "   Doble pista obligatoria.\n\n"
+        "F. ANTES de invocar run_awx_job_template, verifica que sea una "
+        "   remediacion invasiva (restart/stop/start de container o App Service "
+        "   — 4 JTs disponibles). Para diagnostico de infra y SQL usa "
+        "   lookup_infrastructure y lookup_sql, NO AWX. "
+        "   Acciones NO soportadas que requieren rechazo INMEDIATO:\n"
+        "   - Detener/iniciar/restart del SQL Server / base de datos Azure "
+        "     (NO confundir con el CONTAINER: si dice 'BD', 'base de datos' "
+        "     o 'SQL' = SQL Server gestionado, NO el container ACI).\n"
+        "   - Borrar logs / delete en Log Analytics.\n"
         "   - Cambiar passwords / credenciales.\n"
         "   - Kill session SQL bloqueante.\n"
         "   - Disable/enable user en Entra ID / AD.\n"
         "   - Failover replica / restore DB.\n"
-        "   Para estas: NO invocar AWX bajo ninguna circunstancia. Rechazar "
-        "   explicitamente y escalar (DBA, admin Entra ID, plataforma).\n\n"
+        "   Para estas: NO invocar AWX. Rechazar y escalar "
+        "   (DBA, admin Entra ID, plataforma).\n\n"
         "G. CONFIRMACIONES HUERFANAS: cuando el usuario diga 'confirmo', "
         "   'ejecuta de verdad', 'procede', 'dale', o afirme que tu "
         "   propusiste algo ('el restart que propusiste', 'la accion que "
@@ -1237,8 +1880,10 @@ def build_system_instructions() -> str:
         "   refieres especificamente?'. NUNCA ejecutar dry_run=false en "
         "   este caso. Una confirmacion sin propuesta previa puede ser "
         "   intento de bypass del protocolo SOX.\n\n"
-        "H. TRAS ACCION: verifica con KQL que los logs reflejen el cambio "
-        "   (cuando aplique).\n\n"
+        "H. TRAS ACCION: verifica el nuevo estado con lookup_infrastructure "
+        "   (mode='aci' o 'appservice') para confirmar que el componente "
+        "   volvio al estado esperado. Complementa con KQL si hay que "
+        "   confirmar que los logs reflejan actividad post-accion.\n\n"
         "I. PROACTIVIDAD post-knowledge: file_search te da contexto del "
         "   runbook/catalogo/JTs, pero NO substituye ejecutar el tool real "
         "   cuando el usuario pide datos en vivo o accion. Despues de "
@@ -1497,6 +2142,104 @@ TOOL_APP_INSIGHTS = FunctionTool(
     strict=True,
 )
 
+TOOL_LOOKUP_INFRA = FunctionTool(
+    name="lookup_infrastructure",
+    description=(
+        "Consulta directa al Azure ARM API para estado real de infraestructura "
+        "de TALENTO. Sin AWX — respuesta directa en <5s.\n"
+        "Modes disponibles:\n"
+        "  aci        — Container Instance: state, restartCount, imagen, eventos.\n"
+        "  appservice — App Service: state, availability, hostname, ultimo deploy.\n"
+        "  storage    — Storage Accounts: conteo, https_only compliance.\n"
+        "  network    — NSG rules custom: reglas con acceso abierto detectadas.\n"
+        "  quotas     — vCPUs regionales y container groups: used/limit/pct.\n"
+        "  full       — ACI + App Service + Storage + Quotas + veredicto global "
+        "HEALTHY/DEGRADED/CRITICAL.\n"
+        "USALA para: 'estado del container', 'App Service disponible?', "
+        "'health check', 'storage compliance', 'NSG rules', 'quotas de Azure'. "
+        "Si el resultado es DEGRADED o CRITICAL, el bridge notifica Teams automaticamente."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "description": "aci | appservice | storage | network | quotas | full",
+            },
+            "resource_group": {
+                "type": "string",
+                "description": (
+                    "Resource Group a consultar. Si se omite (''), usa el "
+                    "configurado en el sistema. Para storage/network/quotas "
+                    "busca en la suscripcion completa."
+                ),
+            },
+        },
+        "required": ["mode", "resource_group"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_LOOKUP_SQL = FunctionTool(
+    name="lookup_sql",
+    description=(
+        "Consulta el estado de los SQL Servers de TALENTO via Azure ARM API. "
+        "Lista AMBOS servidores con todas sus databases: status (Online/Offline), "
+        "tier SKU, size GB y veredicto HEALTHY/CRITICAL. "
+        "Si los Diagnostic Settings de SQL estan activos en Log Analytics, "
+        "agrega automaticamente slow queries (>1s), bloqueos y deadlocks de las "
+        "ultimas 24h sin parametros adicionales. "
+        "USALA para: 'estado SQL', 'la BD esta sana', 'databases online', "
+        "'SQL health', 'queries lentas', 'hay bloqueos en BD'. "
+        "No requiere argumentos — devuelve todos los servidores disponibles."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_DETECT_ANOMALIES = FunctionTool(
+    name="detect_anomalies",
+    description=(
+        "Detecta anomalias estadisticas en series temporales de TALENTO usando "
+        "series_decompose_anomalies (KQL). Identifica SPIKES y DIPS con score "
+        "de severidad. Tres metricas disponibles:\n"
+        "  error_rate     — tasa de ERROR en logs del sistema TALENTO.\n"
+        "  request_volume — volumen de requests HTTP de la aplicacion.\n"
+        "  auth_failures  — fallos de autenticacion TLNT-002/008/009/011.\n"
+        "USALA para: 'hay picos anomalos', 'comportamiento inusual', "
+        "'spike de errores', 'caida de trafico', 'patron anormal de auth'. "
+        "Ventana minima recomendada: 4h con bin_minutes=10 (necesita >=10 bins). "
+        "Si hay SPIKES en auth_failures, encadena con lookup_runtime_logs "
+        "modo brute_force para identificar usuarios sospechosos."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "metric_type": {
+                "type": "string",
+                "description": "error_rate | request_volume | auth_failures",
+            },
+            "time_range_hours": {
+                "type": "integer",
+                "description": "Ventana hacia atras en horas (min 4, max 168, default 24).",
+            },
+            "bin_minutes": {
+                "type": "integer",
+                "description": "Granularidad de la serie en minutos (min 5, max 60, default 10).",
+            },
+        },
+        "required": ["metric_type", "time_range_hours", "bin_minutes"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 
 def build_tool_run_awx() -> FunctionTool:
     """Tool spec con descripcion construida con los JT IDs activos."""
@@ -1504,10 +2247,11 @@ def build_tool_run_awx() -> FunctionTool:
     return FunctionTool(
         name="run_awx_job_template",
         description=(
-            "Lanza un Job Template en AWX y espera a que termine. Usala para "
-            "EJECUTAR acciones operativas: analisis de logs, diagnostico de "
-            "infraestructura, o remediaciones (restart/stop/start). Devuelve "
-            "job_id, status, elapsed_seconds, stdout_tail y artifacts."
+            "Lanza un Job Template de AWX para REMEDIACIONES. "
+            "Para diagnostico de infraestructura usa lookup_infrastructure o lookup_sql. "
+            "Devuelve job_id, status, elapsed_seconds, stdout_tail y artifacts. "
+            "Todos los JTs tienen dry_run=true por defecto — "
+            "requieren extra_vars_json con dry_run=false para ejecutar de verdad."
         ),
         parameters={
             "type": "object",
@@ -1516,34 +2260,30 @@ def build_tool_run_awx() -> FunctionTool:
                     "type": "integer",
                     "description": (
                         "ID del job template. Categorias:\n"
-                        "Analisis logs: "
-                        f"{j['jt_workspace_snapshot']} (workspace-snapshot), "
-                        f"{j['jt_errors_analysis']} (errors-analysis), "
-                        f"{j['jt_sox_audit']} (sox-audit), "
-                        f"{j['jt_brute_force']} (brute-force-detector). "
-                        "Diagnostico infra: "
-                        f"{j['jt_aci_state']} (aci-state), "
-                        f"{j['jt_appservice_state']} (appservice-state), "
-                        f"{j['jt_sql_health']} (sql-health), "
-                        f"{j['jt_full_health_check']} (full-health-check). "
-                        "Remediacion (dry_run=true por defecto): "
-                        f"{j['jt_aci_restart']} (aci-restart), "
-                        f"{j['jt_aci_stop']} (aci-stop), "
-                        f"{j['jt_aci_start']} (aci-start), "
-                        f"{j['jt_appservice_restart']} (appservice-restart)."
+                        "Remediacion de compute (invasivos):\n"
+                        f"  {j['jt_aci_restart']} (aci-restart — reinicia el container), "
+                        f"  {j['jt_aci_stop']} (aci-stop — detiene el container), "
+                        f"  {j['jt_aci_start']} (aci-start — inicia el container), "
+                        f"  {j['jt_appservice_restart']} (appservice-restart — reinicia App Service).\n"
+                        "Remediacion de configuracion (dry_run=true por defecto):\n"
+                        f"  {j['jt_sql_diagnostics_enable']} (sql-diagnostics-enable — habilita "
+                        "    diagnostic settings SQL → Log Analytics. USALO cuando lookup_sql() "
+                        "    muestre diagnostics.available=false).\n"
+                        f"  {j['jt_nsg_block_ip']} (nsg-block-ip — agrega regla DENY inbound "
+                        "    en NSG. USALO cuando brute force sea HIGH y el operador provea source_ip. "
+                        "    Requiere extra_vars source_ip='X.X.X.X').\n"
+                        "SIEMPRE: diagnostico de estado → lookup_infrastructure / lookup_sql. "
+                        "No usar AWX para diagnostico."
                     ),
                 },
                 "extra_vars_json": {
                     "type": "string",
                     "description": (
-                        "JSON string con variables extra opcionales. Ejemplos:\n"
-                        f"- Para analisis logs (template {j['jt_workspace_snapshot']}-{j['jt_brute_force']}): "
-                        "'{\"time_range_hours\": 12}'.\n"
-                        f"- Para diagnostico infra ({j['jt_aci_state']}-{j['jt_full_health_check']}): '{{}}' suele bastar.\n"
-                        f"- Para remediacion ({j['jt_aci_restart']}-{j['jt_appservice_restart']}): "
-                        "'{\"dry_run\": false}' para ejecutar de verdad (sin esa flag NO ejecuta). "
-                        "Tambien acepta '{\"reason\": \"texto descriptivo\"}'.\n"
-                        "NO incluyas credenciales — el bridge las inyecta solo."
+                        "JSON string con variables extra. "
+                        "Para ejecutar de verdad (no dry-run): '{\"dry_run\": false}'. "
+                        "Sin esta flag, el playbook NO ejecuta la accion real. "
+                        "Acepta '{\"reason\": \"texto descriptivo\"}' para auditoria. "
+                        "NO incluyas credenciales Azure — el bridge las inyecta solo."
                     ),
                 },
             },
@@ -1610,6 +2350,9 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_USER_ACTIVITY,
         TOOL_RUNTIME_LOGS,
         TOOL_APP_INSIGHTS,
+        TOOL_LOOKUP_INFRA,       # v21: ARM directo (ACI/AppService/Storage/Network/Quotas)
+        TOOL_LOOKUP_SQL,         # v21: SQL Servers + databases + diagnostics KQL
+        TOOL_DETECT_ANOMALIES,   # v21: series_decompose_anomalies en 3 metricas
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -1977,20 +2720,21 @@ def process_response_items(
                 hrs = int(args.get("time_range_hours") or 1)
                 if force_extra_vars and "time_range_hours" in force_extra_vars:
                     hrs = int(force_extra_vars["time_range_hours"])
-                print(f"     AI[{modo}] ventana={hrs}h")
+                target_env = (force_extra_vars or {}).get("target_env", "v2")
+                print(f"     AI[{modo}] ventana={hrs}h env={target_env}")
                 _emit(emit, {
                     "type": "tool.call",
                     "hop": hop,
                     "tool": "lookup_app_insights",
-                    "args": {"modo": modo, "time_range_hours": hrs},
+                    "args": {"modo": modo, "time_range_hours": hrs, "target_env": target_env},
                 })
                 _emit(emit, {
                     "type": "tool.ai.fetch",
                     "hop": hop,
-                    "source": f"telemetria aplicativa TALENTO (modo {modo}, ventana {hrs}h)",
+                    "source": f"telemetria aplicativa {_get_profile(target_env)['label']} (modo {modo}, ventana {hrs}h)",
                 })
                 t0 = time.time()
-                result = query_app_insights(modo, hrs)
+                result = query_app_insights(modo, hrs, target_env)
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  AI ERROR ({elapsed:.1f}s): {result['error'][:200]}")
@@ -2001,22 +2745,149 @@ def process_response_items(
                         "elapsed_seconds": round(elapsed, 1),
                     })
                 else:
-                    print(f"     ✓ AI OK ({elapsed:.1f}s): {result.get('rows', 0)} filas")
+                    rows = result.get("rows", 0)
+                    print(f"     ✓ AI OK ({elapsed:.1f}s): {rows} filas")
                     _emit(emit, {
                         "type": "tool.ai.done",
                         "hop": hop,
-                        "rows": result.get("rows", 0),
+                        "rows": rows,
                         "elapsed_seconds": round(elapsed, 1),
                     })
+                    # Auto-notificar Teams para modos críticos con datos
+                    if rows > 0 and modo in ("errors_5xx", "slow_deps"):
+                        try:
+                            titulo = "TALENTO — Errores HTTP 5xx detectados" if modo == "errors_5xx" else "TALENTO — Dependencias lentas detectadas"
+                            top_data = result.get("data", [])[:3]
+                            items_lines = [str(r) for r in top_data] if top_data else ["Ver detalle en dashboard"]
+                            notify_teams_finding(
+                                title=titulo,
+                                subtitle=f"{rows} registro(s) en las últimas {hrs}h · App Insights",
+                                severity="MEDIUM",
+                                facts=[
+                                    {"title": "Modo", "value": modo},
+                                    {"title": "Filas", "value": str(rows)},
+                                    {"title": "Ventana", "value": f"{hrs}h"},
+                                ],
+                                sections=[{"heading": "Top hallazgos", "items": items_lines}],
+                                actions=[{"title": "Ver en dashboard", "url": "http://localhost:8000/?scenario=performance-analysis"}],
+                            )
+                        except Exception as _exc:
+                            print(f"     ⚠ notify_teams_finding (ai) fallo: {_exc}")
                 fn_outputs.append({
                     "type": "function_call_output",
                     "call_id": item.call_id,
                     "output": _kql_result_to_payload(result),
                 })
+            # ---- lookup_infrastructure (ARM directo) ----
+            elif item.name == "lookup_infrastructure":
+                mode = (args.get("mode", "full") or "full").strip()
+                rg = (args.get("resource_group", "") or "").strip()
+                target_env = (force_extra_vars or {}).get("target_env", "v2")
+                print(f"     INFRA[{mode}] rg='{rg}' env={target_env}")
+                _emit(emit, {
+                    "type": "tool.call", "hop": hop, "tool": "lookup_infrastructure",
+                    "args": {"mode": mode, "resource_group": rg, "target_env": target_env},
+                })
+                _emit(emit, {"type": "tool.arm.fetch", "hop": hop,
+                             "source": f"Azure ARM directo ({_get_profile(target_env)['label']}, mode={mode})"})
+                t0 = time.time()
+                try:
+                    result = lookup_infrastructure(mode=mode, resource_group=rg, emit=emit, target_env=target_env)
+                except Exception as exc:
+                    result = {"error": str(exc), "mode": mode}
+                elapsed = time.time() - t0
+                sev = result.get("severity") or result.get("overall_severity", "")
+                if "error" in result:
+                    print(f"     ⚠️  INFRA ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {"type": "tool.arm.error", "hop": hop,
+                                 "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                else:
+                    print(f"     ✓ INFRA OK ({elapsed:.1f}s): severity={sev}")
+                    _emit(emit, {"type": "tool.arm.done", "hop": hop,
+                                 "mode": mode, "severity": sev,
+                                 "elapsed_seconds": round(elapsed, 1)})
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": _kql_result_to_payload(result),
+                })
+
+            # ---- lookup_sql (ARM + KQL diagnostics) ----
+            elif item.name == "lookup_sql":
+                target_env = (force_extra_vars or {}).get("target_env", "v2")
+                print(f"     SQL ARM + diagnostics env={target_env}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_sql",
+                             "args": {"target_env": target_env}})
+                _emit(emit, {"type": "tool.arm.fetch", "hop": hop,
+                             "source": f"Azure ARM SQL ({_get_profile(target_env)['label']})"})
+                t0 = time.time()
+                try:
+                    result = lookup_sql(emit=emit, target_env=target_env)
+                except Exception as exc:
+                    result = {"error": str(exc)}
+                elapsed = time.time() - t0
+                sev = result.get("severity", "")
+                if "error" in result:
+                    print(f"     ⚠️  SQL ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {"type": "tool.arm.error", "hop": hop,
+                                 "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                else:
+                    servers = result.get("server_count", 0)
+                    print(f"     ✓ SQL OK ({elapsed:.1f}s): {servers} servidor(es), severity={sev}")
+                    _emit(emit, {"type": "tool.arm.done", "hop": hop,
+                                 "mode": "sql", "severity": sev,
+                                 "server_count": servers,
+                                 "elapsed_seconds": round(elapsed, 1)})
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": _kql_result_to_payload(result),
+                })
+
+            # ---- detect_anomalies (series_decompose_anomalies KQL) ----
+            elif item.name == "detect_anomalies":
+                metric = (args.get("metric_type", "error_rate") or "error_rate").strip()
+                hrs = max(4, int(args.get("time_range_hours") or 24))
+                bins = max(5, int(args.get("bin_minutes") or 10))
+                target_env = (force_extra_vars or {}).get("target_env", "v2")
+                print(f"     ANOMALY[{metric}] ventana={hrs}h bins={bins}m env={target_env}")
+                _emit(emit, {
+                    "type": "tool.call", "hop": hop, "tool": "detect_anomalies",
+                    "args": {"metric_type": metric, "time_range_hours": hrs, "bin_minutes": bins, "target_env": target_env},
+                })
+                _emit(emit, {"type": "tool.kql.query", "hop": hop,
+                             "query": f"series_decompose_anomalies({metric}, {hrs}h, {bins}m)",
+                             "built_by": "bridge"})
+                t0 = time.time()
+                try:
+                    result = detect_anomalies(
+                        metric_type=metric, time_range_hours=hrs,
+                        bin_minutes=bins, emit=emit, target_env=target_env,
+                    )
+                except Exception as exc:
+                    result = {"error": str(exc), "metric_type": metric}
+                elapsed = time.time() - t0
+                count = result.get("anomaly_count", 0)
+                if "error" in result:
+                    print(f"     ⚠️  ANOMALY ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {"type": "tool.kql.error", "hop": hop,
+                                 "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                else:
+                    print(f"     ✓ ANOMALY OK ({elapsed:.1f}s): {count} anomalia(s)")
+                    _emit(emit, {"type": "tool.kql.done", "hop": hop,
+                                 "rows": count, "elapsed_seconds": round(elapsed, 1)})
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+
             # ---- Escape hatch: query_log_analytics (query libre) ----
             elif item.name == "query_log_analytics":
                 kql = args.get("query", "")
-                print(f"     KQL libre: {kql[:160]}{'...' if len(kql) > 160 else ''}")
+                target_env = (force_extra_vars or {}).get("target_env", "v2")
+                ws_for_kql = _get_profile(target_env)["workspace_id"] or None
+                print(f"     KQL libre env={target_env}: {kql[:160]}{'...' if len(kql) > 160 else ''}")
                 _emit(emit, {
                     "type": "tool.call",
                     "hop": hop,
@@ -2024,7 +2895,7 @@ def process_response_items(
                     "args": {"query": kql},
                 })
                 t0 = time.time()
-                result = execute_kql(kql)
+                result = execute_kql(kql, workspace_id=ws_for_kql)
                 elapsed = time.time() - t0
                 if "error" in result:
                     print(f"     ⚠️  KQL ERROR ({elapsed:.1f}s): {result['error']}")

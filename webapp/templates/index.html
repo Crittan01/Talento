@@ -6,17 +6,16 @@
   <title>TALENTO — Centro de Mando IA</title>
   <link rel="stylesheet" href="/static/css/ecp.css">
   <link rel="icon" href="/static/img/logo-placeholder.svg" type="image/svg+xml">
-  <!-- marked.js para render del markdown del agente -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
   <header class="ecp-header">
-    <img class="ecp-header__logo" src="/static/img/logo-placeholder.svg" alt="Ecopetrol (placeholder)">
+    <img class="ecp-header__logo" src="/static/img/logo-placeholder.svg" alt="Ecopetrol">
     <div class="ecp-header__titles">
       <h1 class="ecp-header__h1">TALENTO — Centro de Mando IA</h1>
-      <h2 class="ecp-header__h2">Agente IA · AWX · Log Analytics · Microsoft Teams</h2>
+      <h2 class="ecp-header__h2">Agente IA · Log Analytics · ARM · App Insights · Teams</h2>
     </div>
-    <div class="ecp-conn-status" id="connStatus" title="Estado de conexión de los componentes">
+    <div class="ecp-conn-status" id="connStatus">
       <div class="ecp-conn-pill" data-svc="foundry"><span class="dot"></span>Foundry</div>
       <div class="ecp-conn-pill" data-svc="awx"><span class="dot"></span>AWX</div>
       <div class="ecp-conn-pill" data-svc="teams"><span class="dot"></span>Teams</div>
@@ -26,15 +25,41 @@
 
   <div class="ecp-band">
     <span>Caso Técnico 4.1 · Administración, Operación y Soporte de TALENTO · Powered by NTT DATA</span>
-    {% if force_mock %}
-    <span class="mock-flag">MODO MOCK ACTIVO</span>
-    {% endif %}
+    {% if force_mock %}<span class="mock-flag">MODO MOCK ACTIVO</span>{% endif %}
   </div>
 
-  <!-- ============ Filter bar (filtros globales) ============ -->
+  <!-- ============ Filter bar ============ -->
   <div class="ecp-filterbar" id="filterbar">
-    <div class="ecp-filterbar__group">
-      <label for="filterTimeRange" class="ecp-filterbar__label">⏱️ Analizar últimas:</label>
+
+    <!-- Selector de instancia (v1 legacy / v2 activo) -->
+    <div class="ecp-filterbar__group ecp-instance-group">
+      <label class="ecp-filterbar__label">🏭 Instancia:</label>
+      <div class="ecp-instance-toggle" id="instanceToggle">
+        <button class="ecp-instance-btn" data-env="v1" title="TALENTO v1 — legacy, workspace vacío">
+          v1 <span class="ecp-instance-label">legacy</span>
+        </button>
+        <button class="ecp-instance-btn ecp-instance-btn--active" data-env="v2" title="TALENTO v2 — instancia activa con datos">
+          v2 <span class="ecp-instance-label">activo ⭐</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Scope para System Health (visible solo cuando infra-health-check está activo) -->
+    <div class="ecp-filterbar__group ecp-scope-group" id="scopeGroup" style="display:none;">
+      <label class="ecp-filterbar__label">🔍 Alcance:</label>
+      <div class="ecp-scope-buttons" id="scopeButtons">
+        <button class="ecp-scope-btn ecp-scope-btn--active" data-scope="completo">🏥 Completo</button>
+        <button class="ecp-scope-btn" data-scope="container">📦 Container</button>
+        <button class="ecp-scope-btn" data-scope="appservice">🌐 App Service</button>
+        <button class="ecp-scope-btn" data-scope="sql">🗄️ SQL</button>
+        <button class="ecp-scope-btn" data-scope="storage">💾 Storage</button>
+        <button class="ecp-scope-btn" data-scope="network">🔒 Red</button>
+      </div>
+      <button class="ecp-btn ecp-scope-run" id="scopeRunBtn" style="display:none;">▶ Ejecutar</button>
+    </div>
+
+    <div class="ecp-filterbar__group" id="timeRangeGroup">
+      <label for="filterTimeRange" class="ecp-filterbar__label">⏱️ Últimas:</label>
       <select id="filterTimeRange" class="ecp-filterbar__select">
         <option value="1">1 hora</option>
         <option value="4">4 horas</option>
@@ -44,192 +69,200 @@
         <option value="168">7 días</option>
       </select>
     </div>
-    <div class="ecp-filterbar__group">
-      <label for="filterThreshold" class="ecp-filterbar__label">🛡️ Umbral brute-force:</label>
-      <select id="filterThreshold" class="ecp-filterbar__select">
-        <option value="3">3 intentos</option>
-        <option value="5" selected>5 intentos</option>
-        <option value="10">10 intentos</option>
-        <option value="20">20 intentos</option>
-      </select>
-    </div>
     <div class="ecp-filterbar__hint" id="filterHint">
-      Los filtros aplican a los escenarios que los soporten (chip "filtros: ..." en la card).
+      Cambiar instancia o alcance aplica al próximo escenario que lances.
     </div>
   </div>
 
   <!-- ============ Layout principal: sidebar + main ============ -->
   <main class="ecp-main" id="mainLayout">
 
-    <!-- ============ Sidebar izquierda con escenarios + info ============ -->
+    <!-- ============ Sidebar con grupos colapsables ============ -->
     <aside class="ecp-sidebar" id="sidebar">
-      <div class="ecp-sidebar__title">Escenarios</div>
-      <div class="ecp-sidebar__list" id="cardsGrid">
-        {# PRIMARY — 6 cards principales con datos reales #}
-        {% for s in scenarios if s.tier == 'primary' %}
-        <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--{{ s.tier }}"
-                 data-scenario-id="{{ s.id }}"
-                 data-renderer="{{ s.renderer }}"
-                 data-free-text="{{ 'true' if s.free_text else 'false' }}"
-                 data-free-text-label="{{ s.free_text_label }}"
-                 data-free-text-placeholder="{{ s.free_text_placeholder }}"
-                 data-accepts-filters="{{ s.accepts_filters | join(',') }}"
-                 title="{{ s.pain_point }}">
-          <div class="ecp-sidebar-card__spinner"></div>
-          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
-            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-            {% if s.accepts_filters %}
-            <span class="ecp-sidebar-card__filters-flag">filtros: {{ s.accepts_filters | join(' + ') }}</span>
-            {% endif %}
-          </div>
-        </article>
-        {% endfor %}
 
-        {# PENDING — capacidades en espera de habilitaciones del ambiente reconstruido #}
-        {% set pending_scenarios = scenarios | selectattr('tier', 'equalto', 'pending') | list %}
-        {% if pending_scenarios %}
-        <div class="ecp-sidebar__subtitle">⏳ Capacidades en habilitacion ({{ pending_scenarios|length }})</div>
-        {% for s in pending_scenarios %}
-        <article class="ecp-sidebar-card ecp-sidebar-card--pending"
-                 data-scenario-id="{{ s.id }}"
-                 data-tier="pending"
-                 data-pending-reason="{{ s.pending_eapps_reason }}"
-                 title="En habilitacion: {{ s.pending_eapps_reason }}">
-          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
-            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-            <span class="ecp-sidebar-card__pending-badge">⏳ En habilitacion</span>
-            <div class="ecp-sidebar-card__pending-reason">{{ s.pending_eapps_reason | truncate(160) }}</div>
-          </div>
-        </article>
-        {% endfor %}
-        {% endif %}
+      <!-- GRUPO: Salud del Sistema -->
+      <details class="ecp-group" open>
+        <summary class="ecp-group__header ecp-group__header--health">🏥 Salud del Sistema</summary>
+        <div class="ecp-group__list">
+          {% for s in scenarios if s.id in ['infra-health-check','anomaly-scan','performance-analysis'] %}
+          <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--primary"
+                   data-scenario-id="{{ s.id }}"
+                   data-renderer="{{ s.renderer }}"
+                   data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                   data-free-text-label="{{ s.free_text_label|default('') }}"
+                   data-free-text-placeholder="{{ s.free_text_placeholder|default('') }}"
+                   data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                   title="{{ s.pain_point }}">
+            <div class="ecp-sidebar-card__spinner"></div>
+            <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+              <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+              {% if s.accepts_filters %}<span class="ecp-sidebar-card__filters-flag">{{ s.accepts_filters | join(' + ') }}</span>{% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </details>
 
-        {# SECONDARY — diagnostico granular + free-text libre #}
-        {% set secondary_scenarios = scenarios | selectattr('tier', 'equalto', 'secondary') | list %}
-        {% if secondary_scenarios %}
-        <div class="ecp-sidebar__subtitle">Utilitarios</div>
-        {% for s in secondary_scenarios %}
-        <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--secondary"
-                 data-scenario-id="{{ s.id }}"
-                 data-renderer="{{ s.renderer }}"
-                 data-free-text="{{ 'true' if s.free_text else 'false' }}"
-                 data-free-text-label="{{ s.free_text_label }}"
-                 data-free-text-placeholder="{{ s.free_text_placeholder }}"
-                 data-accepts-filters="{{ s.accepts_filters | join(',') }}"
-                 title="{{ s.pain_point }}">
-          <div class="ecp-sidebar-card__spinner"></div>
-          <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">{{ s.title }}</div>
-            <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
-          </div>
-        </article>
-        {% endfor %}
-        {% endif %}
-      </div>
+      <!-- GRUPO: Seguridad -->
+      <details class="ecp-group" open>
+        <summary class="ecp-group__header ecp-group__header--security">🛡️ Seguridad</summary>
+        <div class="ecp-group__list">
+          {% for s in scenarios if s.id in ['brute-force','sox-audit','user-activity'] %}
+          <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--primary"
+                   data-scenario-id="{{ s.id }}"
+                   data-renderer="{{ s.renderer }}"
+                   data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                   data-free-text-label="{{ s.free_text_label|default('') }}"
+                   data-free-text-placeholder="{{ s.free_text_placeholder|default('') }}"
+                   data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                   title="{{ s.pain_point }}">
+            <div class="ecp-sidebar-card__spinner"></div>
+            <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+              <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+              {% if s.id == 'brute-force' %}
+              <div class="ecp-card-control" data-stop-click="true">
+                <label class="ecp-card-control__label">Umbral:</label>
+                <select id="bruteThreshold" class="ecp-card-control__select" data-stop-click="true">
+                  <option value="3">≥ 3 intentos</option>
+                  <option value="5" selected>≥ 5 intentos</option>
+                  <option value="10">≥ 10 intentos</option>
+                  <option value="20">≥ 20 intentos</option>
+                </select>
+              </div>
+              {% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </details>
 
-      <div class="ecp-sidebar__title ecp-sidebar__title--info">Información del Sistema</div>
-      <div class="ecp-sidebar__list">
-        {# OCULTO DEMO Ecopetrol: reactivar cuando se quiera exponer certificacion SOX
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="cert" title="Estado de certificación SOX del agente">
-          <div class="ecp-sidebar-card__icon">🔒</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Certificación SOX</div>
-            <div class="ecp-sidebar-card__sub">50/50 PASS · v7-gpt4o-guard</div>
-          </div>
-        </article>
-        #}
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="agent" title="Detalles del agente productivo">
-          <div class="ecp-sidebar-card__icon">🤖</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Agente IA</div>
-            <div class="ecp-sidebar-card__sub">Modelo · Tools · Reglas · JTs</div>
-          </div>
-        </article>
-        {# OCULTO DEMO Ecopetrol: reactivar para mostrar knowledge base interna
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="knowledge" title="Base de conocimiento del agente">
-          <div class="ecp-sidebar-card__icon">📚</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Knowledge Base</div>
-            <div class="ecp-sidebar-card__sub">Catálogo · Runbook · KQL · JT</div>
-          </div>
-        </article>
-        #}
-        {# OCULTO DEMO Ecopetrol: reactivar cuando se quieran mostrar findings del ambiente
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="findings" title="Estado del ambiente y capacidades en habilitacion">
-          <div class="ecp-sidebar-card__icon">⚠️</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Estado del ambiente</div>
-            <div class="ecp-sidebar-card__sub">2 puntos escalados</div>
-          </div>
-        </article>
-        #}
-        <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="runs" title="Historial de evaluaciones">
-          <div class="ecp-sidebar-card__icon">📈</div>
-          <div class="ecp-sidebar-card__body">
-            <div class="ecp-sidebar-card__title">Historial Runs</div>
-            <div class="ecp-sidebar-card__sub">Últimas evaluaciones</div>
-          </div>
-        </article>
-      </div>
+      <!-- GRUPO: Diagnóstico y Forense -->
+      <details class="ecp-group" open>
+        <summary class="ecp-group__header ecp-group__header--forensics">🔬 Diagnóstico y Forense</summary>
+        <div class="ecp-group__list">
+          {% for s in scenarios if s.id in ['errors-production','correlation-trace','tlnt-explorer'] %}
+          <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--primary"
+                   data-scenario-id="{{ s.id }}"
+                   data-renderer="{{ s.renderer }}"
+                   data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                   data-free-text-label="{{ s.free_text_label|default('') }}"
+                   data-free-text-placeholder="{{ s.free_text_placeholder|default('') }}"
+                   data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                   title="{{ s.pain_point }}">
+            <div class="ecp-sidebar-card__spinner"></div>
+            <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+              <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+              {% if s.accepts_filters %}<span class="ecp-sidebar-card__filters-flag">{{ s.accepts_filters | join(' + ') }}</span>{% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </details>
+
+      <!-- GRUPO: Operaciones -->
+      <details class="ecp-group">
+        <summary class="ecp-group__header ecp-group__header--ops">⚡ Operaciones</summary>
+        <div class="ecp-group__list">
+          {% for s in scenarios if s.id in ['free-text','auto-remediate-restart'] %}
+          <article class="ecp-sidebar-card {{ s.card_class }} ecp-sidebar-card--{{ s.tier }}"
+                   data-scenario-id="{{ s.id }}"
+                   data-renderer="{{ s.renderer }}"
+                   data-free-text="{{ 'true' if s.free_text else 'false' }}"
+                   data-free-text-label="{{ s.free_text_label|default('') }}"
+                   data-free-text-placeholder="{{ s.free_text_placeholder|default('') }}"
+                   data-accepts-filters="{{ s.accepts_filters | join(',') }}"
+                   title="{{ s.pain_point }}">
+            <div class="ecp-sidebar-card__spinner"></div>
+            <div class="ecp-sidebar-card__icon">{{ s.icon }}</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">{{ s.title }}</div>
+              <div class="ecp-sidebar-card__sub">{{ s.subtitle }}</div>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </details>
+
+      <!-- Info del sistema -->
+      <details class="ecp-group">
+        <summary class="ecp-group__header ecp-group__header--info">ℹ️ Sistema</summary>
+        <div class="ecp-group__list">
+          <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="agent">
+            <div class="ecp-sidebar-card__icon">🤖</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">Agente IA</div>
+              <div class="ecp-sidebar-card__sub">Modelo · Tools · Reglas</div>
+            </div>
+          </article>
+          <article class="ecp-sidebar-card ecp-sidebar-card--info" data-info-view="runs">
+            <div class="ecp-sidebar-card__icon">📈</div>
+            <div class="ecp-sidebar-card__body">
+              <div class="ecp-sidebar-card__title">Historial Runs</div>
+              <div class="ecp-sidebar-card__sub">Últimas evaluaciones</div>
+            </div>
+          </article>
+        </div>
+      </details>
     </aside>
 
     <!-- ============ Main content ============ -->
     <section class="ecp-content" id="content">
 
-      <!-- Banner del run activo (visible solo cuando hay run) -->
       <div class="ecp-runbanner" id="runBanner" style="display:none;">
         <div class="ecp-runbanner__title-wrap">
           <span class="ecp-runbanner__icon" id="runBannerIcon">
-            <img src="/static/img/iguana.svg" alt="Iguana" class="ecp-iguana ecp-iguana--md">
+            <img src="/static/img/iguana.svg" alt="" class="ecp-iguana ecp-iguana--md">
           </span>
           <h2 class="ecp-runbanner__title" id="runBannerTitle">Ejecutando…</h2>
+          <span class="ecp-env-badge" id="envBadge" style="display:none;"></span>
           <span class="ecp-filters-badge" id="filtersBadge" style="display:none;"></span>
         </div>
         <div class="ecp-runbanner__right">
           <span class="ecp-runbanner__elapsed" id="panelElapsed">0.0s</span>
-          <button class="ecp-runbanner__close" id="panelClose" title="Cerrar y volver">✕</button>
+          <button class="ecp-runbanner__close" id="panelClose" title="Cerrar">✕</button>
         </div>
       </div>
 
-      <!-- Estado de bienvenida (visible cuando no hay run) -->
       <div class="ecp-welcome" id="welcome">
-        <img src="/static/img/iguana.svg" alt="Iguana mascota" class="ecp-iguana ecp-iguana--xl ecp-welcome__icon">
+        <img src="/static/img/iguana.svg" alt="" class="ecp-iguana ecp-iguana--xl ecp-welcome__icon">
         <h2 class="ecp-welcome__title">TALENTO Operations Console</h2>
-        <p class="ecp-welcome__sub">
-          Selecciona un escenario de la izquierda para que el agente lo analice.
-          Ajusta el rango de tiempo arriba o el umbral dentro de la card de brute-force
-          para personalizar el análisis.
-        </p>
+        <p class="ecp-welcome__sub">Selecciona un escenario. El agente diagnostica, investiga y propone acciones.</p>
         <div class="ecp-welcome__pills">
-          <span class="ecp-welcome__pill"><strong>1.</strong> El agente decide qué tool usar</span>
-          <span class="ecp-welcome__pill"><strong>2.</strong> AWX ejecuta playbook auditado</span>
-          <span class="ecp-welcome__pill"><strong>3.</strong> Adaptive card al canal Teams</span>
-          <span class="ecp-welcome__pill"><strong>4.</strong> Síntesis estructurada en español</span>
+          <span class="ecp-welcome__pill"><strong>1.</strong> Elige instancia v1/v2</span>
+          <span class="ecp-welcome__pill"><strong>2.</strong> El agente decide qué tool usar</span>
+          <span class="ecp-welcome__pill"><strong>3.</strong> Adaptive card → Teams</span>
+          <span class="ecp-welcome__pill"><strong>4.</strong> Síntesis estructurada + RCA</span>
         </div>
       </div>
 
-      <!-- Timeline (visible solo cuando hay run) -->
       <div class="ecp-timeline-wrap" id="timelineWrap" style="display:none;">
-        <h3 class="ecp-section-title">⛓️ Línea de tiempo del agente</h3>
+        <h3 class="ecp-section-title">⛓️ Línea de tiempo del agente
+          <span class="ecp-section-env" id="timelineEnvBadge"></span>
+        </h3>
+        <div class="ecp-filterbar__hint" id="activeFiltersHint" style="display:none;"></div>
         <div class="ecp-timeline" id="timeline"></div>
       </div>
 
-      <!-- Resultado (visible solo cuando hay run, después del agent.final) -->
       <div class="ecp-result-wrap" id="resultWrap" style="display:none;">
         <h3 class="ecp-section-title">📋 Resultado estructurado</h3>
         <div class="ecp-result" id="result"></div>
+        <!-- Smart navigation: botones de acción contextual generados por JS -->
+        <div class="ecp-smart-nav" id="smartNav" style="display:none;">
+          <div class="ecp-smart-nav__label">🔗 Investigar más:</div>
+          <div class="ecp-smart-nav__buttons" id="smartNavButtons"></div>
+        </div>
       </div>
 
-      <!-- Info view (visible cuando se selecciona una card de Información del Sistema) -->
       <div class="ecp-infoview" id="infoView" style="display:none;">
         <div class="ecp-infoview__header">
           <h2 class="ecp-infoview__title" id="infoViewTitle">Información</h2>
-          <button class="ecp-runbanner__close" id="infoViewClose" title="Cerrar y volver">✕</button>
+          <button class="ecp-runbanner__close" id="infoViewClose">✕</button>
         </div>
         <div class="ecp-infoview__body" id="infoViewBody">
           <div class="ecp-infoview__loading">Cargando…</div>
@@ -239,20 +272,16 @@
     </section>
   </main>
 
-  <!-- ============ Modal free-text ============ -->
+  <!-- Modal free-text -->
   <div class="ecp-modal-bg" id="freeTextModal">
     <div class="ecp-modal">
       <div class="ecp-modal__header">
-        <strong>Pregunta libre al agente</strong>
-        <button class="ecp-modal__close" id="freeTextCancel" title="Cerrar">×</button>
+        <strong id="modalTitle">Pregunta libre al agente</strong>
+        <button class="ecp-modal__close" id="freeTextCancel">×</button>
       </div>
       <div class="ecp-modal__body">
-        <p style="margin-top:0; color: var(--text-muted); font-size:12px;">
-          Escribe una pregunta operativa sobre TALENTO. El agente decidirá qué tool usar
-          (Log Analytics o AWX) según la pregunta.
-        </p>
-        <textarea id="freeTextInput"
-                  placeholder="Ej: ¿Cuántos eventos hubo en la última hora y de qué tabla provienen?"></textarea>
+        <p class="ecp-modal__hint" id="modalHint">Escribe una pregunta operativa. El agente decide qué tool usar.</p>
+        <textarea id="freeTextInput" placeholder="Ej: ¿Cuántos eventos hubo en la última hora?"></textarea>
       </div>
       <div class="ecp-modal__footer">
         <button class="ecp-btn ecp-btn--secondary" id="freeTextCancelBtn">Cancelar</button>
@@ -263,11 +292,6 @@
 
   <footer class="ecp-footer">
     <strong>Ecopetrol S.A.</strong> · Demo interna de capacidades agentic AI · NTT DATA · 2026
-    <br>
-    <span style="color: var(--ecp-gray); font-size:10px;">
-      Logo y marca Ecopetrol son propiedad de Ecopetrol S.A. Este dashboard es un demo interno NTT
-      y reemplazará el placeholder con el logo aprobado por Comunicaciones Corporativas.
-    </span>
   </footer>
 
   <script src="/static/js/renderers.js"></script>

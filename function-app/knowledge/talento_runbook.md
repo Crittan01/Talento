@@ -1,57 +1,55 @@
-# Runbook Operacional TALENTO
+# Runbook Operacional TALENTO (v21)
 
-Procedimientos paso a paso para escenarios típicos. El agente debe consultar
-este runbook vía `file_search` cuando enfrenta un caso que matchea uno de los
-patrones descritos, para dar respuestas alineadas con los procedimientos del
-equipo de Operaciones.
+Procedimientos paso a paso para escenarios típicos. Consultar vía `file_search`
+con palabras clave del escenario.
+
+**v21 — routing de tools**:
+- Estado infra (ACI, App Service, Storage, Network, Quotas) → `lookup_infrastructure`
+- Estado SQL / databases → `lookup_sql`
+- Anomalías estadísticas → `detect_anomalies`
+- Actividad reciente (<3h): SOX, brute force → `lookup_runtime_logs`
+- Histórico (>3h): usuario, correlación, TLNT → `user_activity` / `tlnt_explorer` / `lookup_correlation_id`
+- Remediación invasiva (restart/stop/start) → `run_awx_job_template` (4 JTs)
 
 ---
 
-## Escenario 1 — Spike de errores en últimos N minutos
+## Escenario 1 — Spike de errores
 
-**Síntoma**: alerta dispara porque la tasa de logs ERROR superó umbral
-(ej. >5 errores/min en últimos 5 min).
+**Síntoma**: alerta por tasa de ERROR elevada / operador reporta fallos en TALENTO.
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Ejecutar `query_log_analytics` con el **Patrón 6** de la guía KQL
-   (spike detection) para confirmar el spike y ver cuándo empezó.
+1. Ejecutar `detect_anomalies(metric_type='error_rate', time_range_hours=24)`
+   para confirmar el spike y ver cuándo comenzó.
 
-2. Si confirmado, ejecutar `query_log_analytics` con el **Patrón 7**
-   (top errores por mensaje) para identificar qué errores dominan.
+2. Ejecutar `tlnt_explorer(codigo='', time_range_hours=6)` para ver los códigos
+   de error más frecuentes en la ventana.
 
-3. Para cada mensaje top, extraer si contiene código TLNT-XXX (regex).
-   Si tiene código → buscar en `talento_error_catalog.md` la definición
-   y acción sugerida.
+3. Para cada código TLNT-XXX top, consultar `file_search` con el código
+   para citar su definición y acción sugerida.
 
-4. Si NO hay códigos TLNT, ejecutar `talento-errors-analysis` para análisis
-   más profundo de patrones.
+4. Si el spike coincide con spikes de `auth_failures` → ejecutar
+   `detect_anomalies(metric_type='auth_failures', ...)` para correlación.
 
-5. Sintetizar al operador:
-   - Cantidad de errores y ventana
-   - Top 3 mensajes
-   - Códigos TLNT identificados (con definición)
-   - Si hay un patrón claro, sugerir siguiente paso (ej. "todos los errores
-     son TLNT-002 desde la misma IP → posible brute force, considerar `talento-brute-force-detector`").
+5. Sintetizar: cantidad de errores, ventana, top códigos TLNT con definición,
+   y siguiente paso sugerido.
 
-**NO ejecutar** ninguna acción de remediación automáticamente — solo proponer.
+**NO ejecutar** acción de remediación automáticamente.
 
 ---
 
 ## Escenario 2 — Container TALENTO en BackOff o CrashLoop
 
-**Síntoma**: alerta indica restartCount alto del Container Instance, o el
-operador reporta "TALENTO no responde / se reinicia solo".
+**Síntoma**: alerta de restartCount alto, o el operador reporta "TALENTO no responde".
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Ejecutar `talento-aci-state` para obtener estado real:
-   - `state` actual (Running/Terminated/Pending/Waiting)
-   - `restartCount`
-   - Últimos eventos del container (BackOff, Killing, Pulling, etc.)
+1. Ejecutar `lookup_infrastructure(mode='aci')` para obtener:
+   - `state` actual (Running/Terminated/Pending)
+   - `restart_count`
+   - `last_event_type` y `last_event_message`
 
-2. Ejecutar `query_log_analytics` para ver últimos logs del container
-   antes del crash:
+2. Ejecutar `query_log_analytics` para ver últimos logs antes del crash:
    ```kql
    ContainerInstanceLog_CL
    | where TimeGenerated > ago(30m)
@@ -61,117 +59,95 @@ operador reporta "TALENTO no responde / se reinicia solo".
    | order by TimeGenerated desc | take 20
    ```
 
-3. Si los logs muestran OOM (OutOfMemoryError), recursos agotados:
-   → recomendar resize del container (manual, no automatizado).
+3. Si los logs muestran OOM (OutOfMemoryError) → recomendar resize del container
+   (manual, no automatizado por el agente).
 
-4. Si los logs muestran error de conexión (BD, dependencias):
-   → primero validar `talento-sql-health` y dependencias antes de restart.
+4. Si los logs muestran error de conexión a BD:
+   → ejecutar `lookup_sql()` para confirmar estado de SQL antes de restart.
 
 5. Si los logs muestran error transitorio o no hay causa clara:
-   → proponer restart con `talento-aci-restart` en `dry_run=true`. Mostrar al operador
-   qué pasaría. Pedir confirmación EXPLÍCITA para ejecutar real.
+   → proponer restart con `run_awx_job_template` JT aci-restart en `dry_run=true`.
+   Mostrar qué pasaría. Pedir confirmación EXPLÍCITA del operador.
 
-6. NUNCA ejecutar restart automático sin confirmación humana — incluso si
-   el caso parece "obvio". La regla SOX exige human-in-the-loop.
+6. NUNCA ejecutar restart automático sin confirmación humana.
 
-**Output esperado**: diagnóstico + propuesta en dry-run + pregunta de
-confirmación al operador.
+**Output esperado**: diagnóstico + propuesta en dry-run + pregunta de confirmación.
 
 ---
 
 ## Escenario 3 — Cierre de nómina lento (degradación de performance)
 
-**Síntoma**: usuarios reportan lentitud durante cierre mensual. Suele
-correlacionar con SQL DTU alto.
+**Síntoma**: usuarios reportan lentitud durante cierre mensual.
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Ejecutar `talento-sql-health` para ver tier y estado de la DB.
-   Si tier es S2 y la fecha es cerca al cierre mensual:
-   → probable saturación de DTUs.
+1. Ejecutar `lookup_sql()` para ver tier y estado de la BD.
+   Si tier es S2 y la fecha es cerca al cierre mensual → probable saturación de DTUs.
 
-2. Ejecutar `query_log_analytics` filtrando por logs del módulo nomina/cierre
-   en últimas horas, buscar:
-   - Patrones de timeout
-   - Mensajes de "lenta", "delay", "timeout" en business logs
-   - Errores TLNT relacionados a operaciones de nómina
+2. Ejecutar `lookup_app_insights(modo='latency_p95', ...)` para ver endpoints lentos.
 
-3. Si confirma degradación de SQL:
-   - Recomendar scale-up temporal (S2 → S3) durante ventana de cierre
-   - Esto NO está automatizado hoy (no hay JT para SQL scale)
-   - Escalar a equipo de infraestructura para resize manual
+3. Ejecutar `lookup_app_insights(modo='slow_deps', ...)` para dependencias lentas.
 
-4. Si la degradación es del container (no SQL):
-   - Validar restartCount con `talento-aci-state`
-   - Validar memoria/CPU asignada (1 vCPU / 1.5 GB es bajo para picos)
-   - Recomendar resize (manual)
+4. Si confirma degradación de SQL:
+   - Recomendar scale-up temporal (S2 → S3) durante la ventana de cierre.
+   - Escalar a equipo de infraestructura (no hay JT para SQL scale).
 
-**Importante**: NUNCA proponer restart durante cierre de nómina activo —
-puede dejar transacciones inconsistentes. Esperar a ventana de mantenimiento.
+5. Si la degradación es del container:
+   - `lookup_infrastructure(mode='aci')` para validar restartCount y recursos.
+   - Recomendar resize (manual).
+
+**NUNCA** proponer restart durante cierre de nómina activo — puede dejar
+transacciones inconsistentes.
 
 ---
 
-## Escenario 4 — Posible brute force (multiples TLNT-002 / TLNT-011)
+## Escenario 4 — Posible brute force (TLNT-002 / TLNT-008 / TLNT-009 / TLNT-011)
 
-**Síntoma**: alerta dispara por aumento de logins fallidos (TLNT-002,
-TLNT-004, TLNT-008) o intentos excedidos (TLNT-011) en ventana corta.
+**Síntoma**: alerta por aumento de logins fallidos o intentos excedidos.
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Ejecutar `talento-brute-force-detector` con default
-   `{"failed_threshold": 5}`:
-   → devuelve `bruteforce_severity` y lista de usuarios sospechosos.
+1. Ejecutar `lookup_runtime_logs(modo='brute_force', usuario='', minutos=180, threshold=5)`.
+   Devuelve usuarios sospechosos con severity HIGH/MEDIUM/LOW.
 
 2. Si severity es HIGH:
-   - Sintetizar al operador: usuarios afectados, IPs origen, cantidad de
-     intentos.
-   - Buscar en `talento_error_catalog.md` definiciones de TLNT-002, TLNT-011
-     para incluir contexto.
-   - **Recomendar acciones** (NO ejecutar automáticamente):
-     a. Bloquear IP temporalmente en NSG (acción manual hoy, no automatizada).
-     b. Deshabilitar usuario en Entra ID si está comprometido (requiere admin
-        de Entra ID, no automatizado).
-     c. Notificar a seguridad / SOC del cliente.
+   - Sintetizar al operador: usuarios afectados, cantidad de intentos.
+   - Buscar en `file_search` definiciones de TLNT-002, TLNT-008, TLNT-009, TLNT-011.
+   - Recomendar (NO ejecutar automáticamente):
+     a. Bloquear IP en NSG (acción manual, no automatizada).
+     b. Deshabilitar usuario en Entra ID si está comprometido (admin Entra ID).
+     c. Notificar al SOC.
 
-3. Si severity es MEDIUM o LOW:
-   - Reportar como "actividad sospechosa, monitorear"
-   - NO recomendar acción inmediata, solo seguimiento.
+3. Correlacionar con `detect_anomalies(metric_type='auth_failures', ...)` para
+   ver si hay spike estadístico que confirme el patrón.
 
-**SOX nota**: incidentes de brute force deben quedar registrados con
-correlation_ids para auditoría. Asegurar que la respuesta incluya los
-identificadores trazables.
+4. Incluir `correlation_id`s en la respuesta para auditoría SOX.
 
 ---
 
-## Escenario 5 — Investigación de caso específico por correlation_id
+## Escenario 5 — Investigación por correlation_id
 
-**Síntoma**: operador reporta un caso puntual con correlation_id o ID
-de transacción ("a las 10:32 Juan no pudo aprobar vacaciones").
+**Síntoma**: operador da un correlation_id para investigar un caso puntual.
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Si el operador da correlation_id directamente:
-   - Ejecutar `query_log_analytics` con **Patrón 3** (trazabilidad por
-     correlation_id) para traer los logs en orden cronológico.
+1. Llamar `lookup_correlation_id(correlation_id=..., time_range_hours=...)`.
+   El bridge auto-detecta formato:
+   - UUID con guiones → Spring Boot MDC (ContainerInstanceLog_CL)
+   - Hex 32 chars sin guiones → App Insights OperationId (AppRequests/Traces/Exceptions)
 
-2. Si NO da correlation_id pero da hora + usuario:
-   - Buscar en logs filtrando por hora + nombre del logger relevante
-     (ej. AprobacionController para temas de aprobaciones).
-   - Extraer el correlation_id del log encontrado.
-   - Re-ejecutar Patrón 3 con ese ID.
+2. Si devuelve 0 filas:
+   - Ampliar la ventana temporal.
+   - Verificar formato del correlation_id con el operador.
+   - No seguir buscando sin más contexto.
 
-3. Reconstruir la secuencia:
-   - Identificar cuándo entró la petición (POST inicial)
-   - Pasos que ejecutó (logs ordenados)
-   - Dónde falló (primer ERROR/WARN)
-   - Si hay código TLNT-XXX → buscar en catálogo
+3. Si hay filas:
+   - Reconstruir la secuencia cronológica.
+   - Identificar el primer ERROR/WARN.
+   - Si hay código TLNT-XXX → buscar en `file_search` la definición.
 
-4. Sintetizar:
-   - "La petición entró a las HH:MM, ejecutó X pasos, falló en paso Y con
-     código TLNT-Z (causa: ...). Acción recomendada: ..."
-
-5. Si la causa es TLNT del catálogo → citar textualmente la "Acción para
-   soporte" del catálogo.
+4. Sintetizar: entrada de la petición, pasos ejecutados, punto de fallo,
+   código TLNT con explicación y acción recomendada.
 
 ---
 
@@ -179,80 +155,101 @@ de transacción ("a las 10:32 Juan no pudo aprobar vacaciones").
 
 **Síntoma**: operador o schedule periódico pregunta "cómo está TALENTO?".
 
-**Pasos del agente**:
+**Pasos**:
 
-1. Ejecutar `talento-full-health-check` — orchestrator de ACI + App Service + SQL.
+1. Ejecutar `lookup_infrastructure(mode='full')` para obtener veredicto global
+   HEALTHY/DEGRADED/CRITICAL con estado de ACI, App Service, Storage y Quotas.
 
-2. Si `overall_severity` es HEALTHY:
-   - Reportar como "todos los componentes saludables" + datos clave
-     (Running, sin reinicios, etc.).
+2. Ejecutar `lookup_sql()` para estado de SQL Servers + databases.
 
-3. Si DEGRADED:
+3. Si `overall_severity` es HEALTHY y SQL está OK:
+   - Reportar todos los componentes saludables + datos clave.
+
+4. Si DEGRADED:
    - Identificar qué capa muestra problema.
-   - Ejecutar el JT específico de esa capa (36/37/38) para detalle.
-   - Sugerir validación adicional con KQL.
+   - Ejecutar `lookup_infrastructure` con el mode específico para detalle.
+   - Sugerir validación adicional.
 
-4. Si CRITICAL:
-   - Identificar la causa raíz con el JT específico + análisis de logs.
-   - Sugerir acción concreta (no automatizar).
+5. Si CRITICAL:
+   - Identificar causa raíz con la tool específica + análisis de logs.
+   - Sugerir acción concreta (no automatizar sin confirmación).
 
-**NUNCA** ejecutar acción de remediación tras un health check sin que el
-operador lo pida explícitamente.
+**NUNCA** ejecutar remediación tras health check sin que el operador lo pida.
 
 ---
 
-## Principios transversales del runbook
+## Escenario 7 — SQL degradado (slow queries / bloqueos / deadlocks)
 
-1. **Diagnóstico antes que acción**: nunca proponer remediación sin haber
-   ejecutado al menos un JT de diagnóstico o KQL relevante. La acción
-   debe estar respaldada por datos.
+**Síntoma**: lentitud reportada con evidencia de problema en base de datos.
 
-2. **Dry-run por defecto**: cualquier acción invasiva (40-43) se propone
-   en dry-run primero. Solo se ejecuta real con confirmación explícita.
+**Pasos**:
+
+1. Ejecutar `lookup_sql()` — si los Diagnostic Settings están activos en
+   Log Analytics, devuelve automáticamente slow queries, bloqueos y deadlocks
+   de las últimas 24h.
+
+2. Si `diagnostics.available = false`:
+   - El archivo indica cómo habilitarlos (Azure Portal → SQL Server →
+     Monitoring → Diagnostic settings → enviar a Log Analytics workspace).
+   - Mientras tanto, usar `lookup_app_insights(modo='slow_deps', ...)` para
+     detectar dependencias lentas desde el lado de la aplicación.
+
+3. Si hay slow queries identificadas:
+   - Escalar al DBA con el detalle del query_hash y duration.
+   - Recomendar análisis de índices (manual).
+
+4. Si hay deadlocks:
+   - Escalar al DBA para análisis de transacciones.
+   - NO intentar matar sesiones — el agente no tiene esa capacidad.
+
+---
+
+## Escenario 8 — Anomalía estadística detectada
+
+**Síntoma**: ELK dispara alerta por comportamiento inusual en métricas de TALENTO.
+
+**Pasos**:
+
+1. Ejecutar `detect_anomalies(metric_type='error_rate', time_range_hours=24)`
+   para ver timestamps de anomalías con score.
+
+2. Ejecutar `detect_anomalies(metric_type='auth_failures', time_range_hours=24)`.
+
+3. Si hay SPIKEs en `auth_failures` → ejecutar `lookup_runtime_logs(modo='brute_force')`
+   para identificar usuarios sospechosos.
+
+4. Si hay SPIKEs en `error_rate` + spike simultáneo en `request_volume`:
+   → probable sobrecarga de tráfico. Escalar a infra para autoscaling.
+
+5. Si hay DIPs en `request_volume`:
+   → posible caída del servicio. Ejecutar `lookup_infrastructure(mode='aci')`
+   para verificar estado del container.
+
+6. Correlacionar timestamps de anomalías con deployments recientes si aplica.
+
+---
+
+## Principios transversales del runbook (v21)
+
+1. **Diagnóstico antes que acción**: usar `lookup_infrastructure`, `lookup_sql`
+   o las tools de logs antes de proponer cualquier remediación.
+
+2. **Dry-run por defecto**: cualquier acción invasiva se propone en dry-run
+   primero. Solo se ejecuta real con confirmación explícita en segunda solicitud.
 
 3. **Citar catálogo, no inventar**: si aparece código TLNT-XXX, consultar
-   `talento_error_catalog.md` vía file_search y citar textualmente. Si el
-   código no está en el catálogo, decirlo y sugerir validar con EAPS.
+   `talento_error_catalog.md` vía file_search y citar textualmente.
 
 4. **Correlation ID es oro**: incluir siempre el correlation_id en la
-   respuesta para que el operador tenga trazabilidad y audit trail.
+   respuesta para trazabilidad y audit trail SOX.
 
-5. **Reconocer límites**: si el problema requiere intervención fuera del
-   alcance del agente (DBA, admin de Entra ID, deploy de versión nueva),
-   decirlo claro y escalar a la persona correcta.
+5. **Reconocer límites**: si el problema requiere DBA, admin Entra ID o
+   deploy de nueva versión, decirlo y escalar.
 
-6. **Honestidad sobre confianza**: si el diagnóstico es probabilístico (no
-   hay datos suficientes), decir "probable causa: X (no confirmado)" en
-   lugar de afirmar con certeza falsa.
+6. **AWX solo para remediación**: `run_awx_job_template` únicamente para
+   restart/stop/start (4 JTs). Para diagnóstico → tools directas.
 
-7. **Acción debe estar en el catálogo de JTs ANTES de invocar AWX**: antes
-   de llamar `run_awx_job_template`, verificar que la acción solicitada
-   corresponda a uno de los 12 JTs documentados en `talento_jt_catalog.md`
-   (IDs 32-43). Si el usuario pide algo que NO está en el catálogo
-   (ej. "detén la BD", "borra los logs", "cambia la contraseña del admin",
-   "kill session SQL bloqueante", "failover réplica", "disable user en
-   Entra ID"), **NO invocar AWX**. Rechazar explícitamente con:
-   - Indicar que la acción NO es soportada por los JTs disponibles.
-   - Escalar al equipo correcto (DBA para SQL, admin Entra ID para usuarios,
-     equipo de plataforma para compliance/borrado de logs).
-   - NO intentar "ver si funciona" llamando AWX — generaría incidentes
-     falsos y dejaría rastro de intentos no autorizados.
-
-8. **Confirmaciones huérfanas**: cuando un usuario diga "confirmo",
-   "ejecuta de verdad", "procede", "dale", o similar para autorizar una
-   acción con `dry_run=false`, SOLO ejecutar si TÚ propusiste explícitamente
-   en un turno previo de la MISMA conversación una acción concreta en
-   dry-run. Si NO hay propuesta previa identificable en el historial de
-   la conversación actual:
-   - RECHAZAR la "confirmación" como huérfana.
-   - Pedir aclaración: "¿A qué acción te refieres? No encuentro una propuesta
-     previa en esta conversación que requiera confirmación".
-   - NO ejecutar dry_run=false bajo ninguna circunstancia. Una confirmación
-     sin propuesta previa puede ser un intento de bypass del protocolo SOX.
-
-9. **Verificación de contexto previo en confirmaciones**: para distinguir
-   "confirmación válida" de "huérfana", el agente debe revisar los turnos
-   previos de la conversación actual. Confirmación válida = el turno
-   inmediatamente anterior del agente propuso una acción específica en
-   dry-run y el usuario está confirmando ESA acción. Cualquier otra
-   "confirmación" es huérfana.
+7. **Confirmaciones huérfanas**: solo ejecutar `dry_run=false` si en la
+   conversación actual el agente propuso explícitamente la acción en dry-run
+   y el operador la confirma. Sin propuesta previa = confirmación huérfana
+   = rechazar y pedir aclaración.

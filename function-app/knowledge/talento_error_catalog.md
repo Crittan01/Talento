@@ -1,8 +1,8 @@
 # Catálogo de Códigos de Error TALENTO
 
 Este documento contiene los códigos de error formales que emite la aplicación
-TALENTO en sus logs estructurados (campo `error_code` o aparición textual del
-código en el campo `message`). El agente IA debe consultar este catálogo cuando
+TALENTO en sus logs estructurados (campo `codigo_error` dentro del JSON del campo
+`Message`, o aparición textual del código en el campo `message`). El agente IA debe consultar este catálogo cuando
 identifique cualquier código `TLNT-XXX` para entregar al usuario una explicación
 oficial y una acción concreta.
 
