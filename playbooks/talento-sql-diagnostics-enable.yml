@@ -1,0 +1,227 @@
+---
+# talento-sql-diagnostics-enable.yml
+#
+# REMEDIACION — habilita Diagnostic Settings en los SQL Servers de TALENTO
+# para enviar datos de performance a Log Analytics workspace 2.
+#
+# Resuelve: lookup_sql() devuelve diagnostics.available=false.
+# Una vez habilitado, lookup_sql() mostrará slow queries, bloqueos y deadlocks.
+#
+# DRY-RUN (default): muestra qué settings SE CREARÍAN sin tocar Azure.
+# REAL (dry_run=false): crea/actualiza los diagnostic settings idempotentemente.
+#
+# Categorías habilitadas:
+#   SQLInsights, QueryStoreRuntimeStatistics, QueryStoreWaitStatistics,
+#   Errors, DatabaseWaitStatistics, Timeouts, Blocks, Deadlocks, AutomaticTuning
+#
+# Variables principales (inyectadas por bridge desde .env):
+#   sql_server_name     nombre del SQL Server  (ej. sqlserver-ecopetrol2)
+#   sql_resource_group  RG del SQL Server       (ej. rg-central-solucion-talento2)
+#   sql_db_name         nombre de la database   (ej. ecopetroldb2)
+#   workspace_id        ID del workspace LA     (ej. 14135f7a-...)
+#   dry_run             true (default)
+
+- name: TALENTO SQL Diagnostics Enable — habilita diagnostic settings
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+
+    sql_server:   "{{ sql_server_name   | default('sqlserver-ecopetrol2') }}"
+    sql_rg:       "{{ sql_resource_group | default('rg-central-solucion-talento2') }}"
+    sql_db:       "{{ sql_db_name       | default('ecopetroldb2') }}"
+
+    # Workspace 2 (activo con datos vivos) — puede sobreescribirse
+    ws_subscription: "{{ workspace_subscription | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    ws_rg:           "{{ workspace_resource_group | default('rg-central-solucion-talento2') }}"
+    ws_name:         "{{ workspace_name | default('law-central-soluciontalento2') }}"
+
+    is_dry_run:   "{{ dry_run | default(true) | bool }}"
+    diag_name:    "sql-to-law-talento2"
+    teams_url:    "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+    diag_categories:
+      - SQLInsights
+      - AutomaticTuning
+      - QueryStoreRuntimeStatistics
+      - QueryStoreWaitStatistics
+      - Errors
+      - DatabaseWaitStatistics
+      - Timeouts
+      - Blocks
+      - Deadlocks
+
+  tasks:
+    - name: Validar vars requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+        fail_msg: "Faltan vars Azure (tenant_id, client_id, client_secret, subscription_id)"
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type:    client_credentials
+          client_id:     "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource:      "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_resp
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_resp.json.access_token }}"
+      no_log: true
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Leer diagnostic settings actuales (siempre, dry-run y real)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Leer diagnostic settings actuales del SQL Server
+      ansible.builtin.uri:
+        url: >-
+          https://management.azure.com/subscriptions/{{ subscription_id
+          }}/resourceGroups/{{ sql_rg
+          }}/providers/Microsoft.Sql/servers/{{ sql_server
+          }}/databases/{{ sql_db
+          }}/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: [200, 204]
+        timeout: 30
+      register: current_diag
+
+    - name: Evaluar estado actual
+      ansible.builtin.set_fact:
+        has_existing: "{{ (current_diag.json.value | default([])) | length > 0 }}"
+        existing_names: "{{ (current_diag.json.value | default([])) | map(attribute='name') | list }}"
+        target_ws_id: >-
+          /subscriptions/{{ ws_subscription
+          }}/resourceGroups/{{ ws_rg
+          }}/providers/Microsoft.OperationalInsights/workspaces/{{ ws_name }}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # DRY-RUN: mostrar lo que SE CONFIGURARÍA
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[DRY-RUN] Mostrar diagnóstico actual y acción planificada"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se modificará Azure"
+          - "════════════════════════════════════════════════════════"
+          - "  SQL Server:    {{ sql_server }}"
+          - "  Database:      {{ sql_db }}"
+          - "  Resource Group: {{ sql_rg }}"
+          - "  Settings actuales: {{ existing_names | join(', ') | default('ninguno') }}"
+          - ""
+          - "  ACCIÓN PLANIFICADA: PUT diagnosticSettings/{{ diag_name }}"
+          - "  Workspace destino: {{ target_ws_id }}"
+          - "  Categorías: {{ diag_categories | join(', ') }}"
+          - ""
+          - "  Para ejecutar de verdad: extra_vars={\"dry_run\": false}"
+      when: is_dry_run
+
+    - name: "[DRY-RUN] Publicar set_stats"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: false
+          dry_run: true
+          sql_server: "{{ sql_server }}"
+          database: "{{ sql_db }}"
+          target_workspace: "{{ ws_name }}"
+          categories_count: "{{ diag_categories | length }}"
+          existing_settings: "{{ existing_names }}"
+          message: "DRY-RUN: se habilitarían diagnostic settings en {{ sql_server }}/{{ sql_db }} → {{ ws_name }}"
+      when: is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────────
+    # REAL: crear/actualizar diagnostic settings
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[REAL] Crear/actualizar diagnostic settings"
+      ansible.builtin.uri:
+        url: >-
+          https://management.azure.com/subscriptions/{{ subscription_id
+          }}/resourceGroups/{{ sql_rg
+          }}/providers/Microsoft.Sql/servers/{{ sql_server
+          }}/databases/{{ sql_db
+          }}/providers/microsoft.insights/diagnosticSettings/{{ diag_name
+          }}?api-version=2021-05-01-preview
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+          Content-Type:  "application/json"
+        body_format: json
+        body:
+          properties:
+            workspaceId: "{{ target_ws_id }}"
+            logs: >-
+              {{ diag_categories | map('community.general.dict_kv',
+                 {'enabled': true}) | list }}
+        status_code: [200, 201]
+        timeout: 30
+      register: diag_result
+      when: not is_dry_run
+
+    - name: "[REAL] Verificar resultado"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: true
+          dry_run: false
+          sql_server: "{{ sql_server }}"
+          database: "{{ sql_db }}"
+          diag_setting_name: "{{ diag_name }}"
+          target_workspace: "{{ ws_name }}"
+          categories_enabled: "{{ diag_categories }}"
+          http_status: "{{ diag_result.status | default('?') }}"
+          message: >-
+            Diagnostic settings habilitados en {{ sql_server }}/{{ sql_db }}.
+            Datos fluirán a {{ ws_name }} en ~10-15 minutos.
+      when: not is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Teams notification (siempre)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - type: TextBlock
+              text: >-
+                {{ '🔍 DRY-RUN' if is_dry_run else '✅ EJECUTADO' }}
+                — SQL Diagnostics {{ 'planificado' if is_dry_run else 'habilitado' }}
+              weight: Bolder
+              size: Medium
+            - type: FactSet
+              facts:
+                - title: Servidor
+                  value: "{{ sql_server }}"
+                - title: Database
+                  value: "{{ sql_db }}"
+                - title: Workspace destino
+                  value: "{{ ws_name }}"
+                - title: Categorías
+                  value: "{{ diag_categories | length }} (SQLInsights, QueryStore, Blocks, Deadlocks...)"
+                - title: Modo
+                  value: "{{ 'DRY-RUN (no modificado)' if is_dry_run else 'REAL — datos fluirán en ~15 min' }}"
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true

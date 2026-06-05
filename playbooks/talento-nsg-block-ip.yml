@@ -1,0 +1,230 @@
+---
+# talento-nsg-block-ip.yml
+#
+# REMEDIACION DE SEGURIDAD — agrega una regla DENY inbound en el NSG
+# para bloquear una IP sospechosa detectada en un ataque de brute force.
+#
+# Requiere: el operador provee la IP origen (no está en los logs de TALENTO
+# por ausencia del campo IP en el schema actual — Hallazgo EAPPS pendiente).
+# Cuando EAPPS instrumente el MDC con remote_addr, este playbook podrá
+# lanzarse automáticamente desde el agente.
+#
+# DRY-RUN (default): muestra la regla que SE AGREGARÍA sin modificar el NSG.
+# REAL (dry_run=false): agrega la regla DENY. Idempotente por nombre de regla.
+#
+# Variables:
+#   source_ip        IP a bloquear (OBLIGATORIA)    ej. 192.168.1.100
+#   nsg_name         nombre del NSG                 default: nsg_solucion_talento
+#   resource_group   RG del NSG                     default: rg-central-solucion-talento2
+#   rule_priority    prioridad (100-4095)            default: 110
+#   rule_reason      descripcion del bloqueo         default: brute-force-detection
+#   dry_run          true (default)
+
+- name: TALENTO NSG Block IP — agrega regla DENY inbound
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+
+    target_ip:    "{{ source_ip | mandatory }}"
+    nsg:          "{{ nsg_name | default('nsg_solucion_talento') }}"
+    nsg_rg:       "{{ resource_group | default('rg-central-solucion-talento2') }}"
+    priority:     "{{ rule_priority | default(110) | int }}"
+    reason:       "{{ rule_reason | default('brute-force-detection') }}"
+    is_dry_run:   "{{ dry_run | default(true) | bool }}"
+    teams_url:    "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+
+    # Nombre de la regla: sanitizar IP (puntos → guiones)
+    rule_name: "deny-{{ target_ip | replace('.', '-') | replace(':', '-') }}-{{ reason }}"
+
+  tasks:
+    - name: Validar vars requeridas
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - client_secret | length > 0
+          - subscription_id | length > 0
+          - target_ip | length > 0
+          - target_ip | regex_search('^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$')
+        fail_msg: >-
+          Faltan vars o source_ip inválida.
+          Formato esperado: 192.168.1.100 o 192.168.1.0/24
+
+    - name: Validar prioridad en rango permitido
+      ansible.builtin.assert:
+        that:
+          - priority | int >= 100
+          - priority | int <= 4095
+        fail_msg: "rule_priority debe estar entre 100 y 4095"
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type:    client_credentials
+          client_id:     "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource:      "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_resp
+      no_log: true
+
+    - name: Guardar token
+      ansible.builtin.set_fact:
+        arm_token: "{{ token_resp.json.access_token }}"
+      no_log: true
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Leer estado actual del NSG
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Leer NSG actual
+      ansible.builtin.uri:
+        url: >-
+          https://management.azure.com/subscriptions/{{ subscription_id
+          }}/resourceGroups/{{ nsg_rg
+          }}/providers/Microsoft.Network/networkSecurityGroups/{{ nsg
+          }}?api-version=2023-05-01
+        method: GET
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+        status_code: 200
+        timeout: 30
+      register: nsg_resp
+
+    - name: Evaluar reglas existentes
+      ansible.builtin.set_fact:
+        existing_rules: >-
+          {{ nsg_resp.json.properties.securityRules | default([])
+             | map(attribute='name') | list }}
+        rule_already_exists: >-
+          {{ rule_name in (nsg_resp.json.properties.securityRules | default([])
+             | map(attribute='name') | list) }}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # DRY-RUN
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[DRY-RUN] Mostrar regla que SE AGREGARÍA"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se modificará el NSG"
+          - "════════════════════════════════════════════════════════"
+          - "  NSG:           {{ nsg }} ({{ nsg_rg }})"
+          - "  IP a bloquear: {{ target_ip }}"
+          - "  Nombre regla:  {{ rule_name }}"
+          - "  Prioridad:     {{ priority }}"
+          - "  Dirección:     Inbound"
+          - "  Acción:        Deny"
+          - "  ¿Ya existe?:   {{ rule_already_exists }}"
+          - "  Reglas custom actuales: {{ existing_rules | join(', ') | default('ninguna') }}"
+          - ""
+          - "  Para ejecutar de verdad: extra_vars={\"dry_run\": false, \"source_ip\": \"{{ target_ip }}\"}"
+      when: is_dry_run
+
+    - name: "[DRY-RUN] Set_stats"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: false
+          dry_run: true
+          target_ip: "{{ target_ip }}"
+          nsg: "{{ nsg }}"
+          rule_name: "{{ rule_name }}"
+          priority: "{{ priority }}"
+          already_exists: "{{ rule_already_exists }}"
+          message: >-
+            DRY-RUN: se agregaría regla DENY inbound {{ target_ip }}
+            en {{ nsg }} (prioridad {{ priority }})
+      when: is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────────
+    # REAL: agregar regla DENY
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[REAL] Agregar regla DENY inbound"
+      ansible.builtin.uri:
+        url: >-
+          https://management.azure.com/subscriptions/{{ subscription_id
+          }}/resourceGroups/{{ nsg_rg
+          }}/providers/Microsoft.Network/networkSecurityGroups/{{ nsg
+          }}/securityRules/{{ rule_name
+          }}?api-version=2023-05-01
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ arm_token }}"
+          Content-Type:  "application/json"
+        body_format: json
+        body:
+          properties:
+            priority:                    "{{ priority | int }}"
+            protocol:                    "*"
+            access:                      "Deny"
+            direction:                   "Inbound"
+            sourceAddressPrefix:         "{{ target_ip }}"
+            sourcePortRange:             "*"
+            destinationAddressPrefix:    "*"
+            destinationPortRange:        "*"
+            description: >-
+              Bloqueo IP sospechosa - {{ reason }} - agente IA TALENTO
+        status_code: [200, 201]
+        timeout: 30
+      register: rule_result
+      when: not is_dry_run
+
+    - name: "[REAL] Verificar regla creada"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: true
+          dry_run: false
+          target_ip: "{{ target_ip }}"
+          nsg: "{{ nsg }}"
+          rule_name: "{{ rule_name }}"
+          priority: "{{ priority }}"
+          http_status: "{{ rule_result.status | default('?') }}"
+          message: >-
+            Regla DENY inbound agregada para {{ target_ip }} en {{ nsg }}.
+            Para revertir: eliminar regla {{ rule_name }} del NSG.
+      when: not is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Teams notification (siempre)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - type: TextBlock
+              text: >-
+                {{ '🔍 DRY-RUN' if is_dry_run else '🚫 IP BLOQUEADA' }}
+                — NSG Block IP ({{ reason }})
+              weight: Bolder
+              size: Medium
+              color: "{{ 'default' if is_dry_run else 'attention' }}"
+            - type: FactSet
+              facts:
+                - title: IP objetivo
+                  value: "{{ target_ip }}"
+                - title: NSG
+                  value: "{{ nsg }}"
+                - title: Nombre regla
+                  value: "{{ rule_name }}"
+                - title: Prioridad
+                  value: "{{ priority }}"
+                - title: Modo
+                  value: "{{ 'DRY-RUN (NSG no modificado)' if is_dry_run else 'REAL — tráfico bloqueado' }}"
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true
