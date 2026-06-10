@@ -113,6 +113,12 @@ def load_env(path: Path) -> dict:
 
 ENV = load_env(ENV_PATH)
 
+# Panel de Aprobacion AIOps — endpoint donde el agente reporta incidentes para
+# aprobacion humana (human-in-the-loop). Puerto :9200 CONFIRMADO por el equipo
+# de ELK (2026-06-10). El panel escribe en Elasticsearch y Kibana lo visualiza
+# (indice azure-operaciones-aiops-*). Configurable por .env si cambia.
+PANEL_INCIDENTE_URL = ENV.get("PANEL_INCIDENTE_URL", "http://48.214.147.7:9200/api/incidente")
+
 
 # ============================================================================
 # Credencial Azure: detecta si estamos en Function (usa User Assigned MI) o
@@ -197,13 +203,13 @@ TLNT_CATALOG = {
     "TLNT-015": ("ERROR_CREAR_SOLICITUD",        "Error al crear la solicitud",
                  "Revise los datos enviados e intente nuevamente."),
 }
-CATALOG_VERSION = "v21-infra-anomaly"
-# v21: lookup_infrastructure (ARM directo — ACI/AppService/Storage/Network/Quotas/Full,
-# reemplaza JTs 52-55), lookup_sql (ARM directo — SQL Servers + DBs + diagnostics KQL
-# cuando esten habilitados, reemplaza JT 54), detect_anomalies (series_decompose_anomalies
-# sobre error_rate/request_volume/auth_failures). AWX reducido a 4 JTs invasivos.
-# Teams notifications movidas al bridge via notify_teams_finding.
-# v20 base: lookup_correlation_id dual UUID/OperationId, 7 tools originales.
+CATALOG_VERSION = "v22-aiops-panel"
+# v22: tool report_incident → Panel de Aprobacion AIOps (human-in-the-loop).
+# El agente, tras investigar una alerta ELK, reporta el incidente al panel
+# (POST /api/incidente) con modo=semiautomatico/pendiente_aprobacion. El panel
+# escribe en Elasticsearch y Kibana lo visualiza (azure-operaciones-aiops-*).
+# v21: lookup_infrastructure (ARM directo), lookup_sql, detect_anomalies. AWX 6 JTs.
+# v20 base: lookup_correlation_id dual UUID/OperationId.
 
 
 # AGENT_NAME es fijo: cada deploy crea una NUEVA VERSION del mismo agente
@@ -1266,6 +1272,142 @@ def aggregate_runtime_logs(records: list, mode: str, usuario: str = "", codigo: 
 _TLNT_CATALOG_CACHE = None
 
 
+# ============================================================================
+# Panel de Aprobacion AIOps — el agente reporta incidentes para aprobacion
+# humana (human-in-the-loop). El panel escribe en Elasticsearch y Kibana lo
+# visualiza. Contrato confirmado con POST real (responde {status, index, _id}).
+# ============================================================================
+
+# Mapeo determinista metrica de alerta → categoria del incidente
+_METRIC_CATEGORIA = {
+    "error_rate": "aplicacion", "error_spike": "aplicacion", "tlnt_errors": "aplicacion",
+    "auth_failures": "seguridad", "brute_force": "seguridad", "failed_login": "seguridad",
+    "sql_dtu": "base_datos", "sql_connections": "base_datos", "database": "base_datos", "deadlock": "base_datos",
+    "latency_p95": "aplicacion", "latency": "aplicacion", "http_5xx": "aplicacion",
+    "throughput": "aplicacion", "slow_dependency": "aplicacion",
+    "container_restart": "infraestructura", "container_state": "infraestructura",
+    "appservice_down": "infraestructura", "cpu": "infraestructura", "memory": "infraestructura",
+}
+
+
+def _categoria_from_metric(metric: str) -> str:
+    m = (metric or "").lower().strip()
+    for key, cat in _METRIC_CATEGORIA.items():
+        if key in m:
+            return cat
+    return "infraestructura"
+
+
+def _kedb_hit(error_code: str) -> bool:
+    """KEDB hit = el error esta documentado en el catalogo TLNT (known error)."""
+    if not error_code:
+        return False
+    return error_code.strip().upper() in TLNT_CATALOG
+
+
+def post_incident_to_panel(payload: dict) -> dict:
+    """POST del incidente al Panel de Aprobacion AIOps. Devuelve la respuesta
+    del panel ({status, index, _id}) o {error}. No rompe el flow si falla."""
+    import datetime
+    ca = os.environ.get("REQUESTS_CA_BUNDLE")
+    try:
+        r = requests.post(
+            PANEL_INCIDENTE_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+            verify=ca if (ca and PANEL_INCIDENTE_URL.startswith("https")) else (PANEL_INCIDENTE_URL.startswith("https")),
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        print(f"[panel] ⚠ post_incident_to_panel fallo: {exc}")
+        return {"error": str(exc)}
+
+
+def build_incident_payload(
+    *,
+    incident_id: str,
+    alert: dict,
+    causa_raiz: str,
+    confianza_pct: int,
+    categoria: str,
+    error_code: str = "",
+    playbook: Optional[str] = None,
+    requiere_remediacion: bool = False,
+    tiempo_ms: int = 0,
+) -> dict:
+    """Construye el payload del contrato del Panel de Aprobacion a partir de
+    los datos de la alerta ELK + el analisis del agente."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ts = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    det = alert or {}
+    ctx = det.get("context", {}) or {}
+    severidad = str(det.get("severity", "unknown")).lower()
+
+    # automatizacion: si hay playbook propuesto → remediacion pendiente_aprobacion;
+    # si no → solo diagnostico (informe, sin accion).
+    if requiere_remediacion and playbook:
+        automatizacion = {
+            "playbook": playbook,
+            "tipo": "remediacion",
+            "modo": "semiautomatico",          # CRITICO: pasa por aprobacion humana
+            "estado": "pendiente_aprobacion",  # CRITICO: el panel lo muestra esperando
+            "dry_run": False,                  # propuesta de accion real (no ejecuta hasta aprobar)
+            "timestamp": ts,
+            "job_id": None,
+            "duracion_segundos": None,
+            "operador_aprobador": "L1",
+            "sla_aprobacion_min": 15,
+        }
+        resolucion = "pendiente_aprobacion"
+    else:
+        automatizacion = {
+            "playbook": None,
+            "tipo": "diagnostico",
+            "modo": "semiautomatico",
+            "estado": "informativo",
+            "dry_run": True,
+            "timestamp": ts,
+            "job_id": None,
+            "duracion_segundos": None,
+            "operador_aprobador": "L1",
+            "sla_aprobacion_min": 15,
+        }
+        resolucion = "diagnosticado"
+
+    return {
+        "incident_id": incident_id,
+        "deteccion": {
+            "alerta_regla": det.get("rule", det.get("metric", "?")),
+            "modulo_talento": det.get("resource", "talento"),
+            "error_code": error_code or "",
+            "nivel_severidad": severidad,
+            "timestamp": ts,
+        },
+        "analisis_agente": {
+            "causa_raiz": (causa_raiz or "").strip()[:500],
+            "confianza_pct": int(max(0, min(confianza_pct or 0, 100))),
+            "categoria": categoria or _categoria_from_metric(det.get("metric", "")),
+            "kedb_hit": _kedb_hit(error_code),
+            "tiempo_ms": int(tiempo_ms or 0),
+            "timestamp": ts,
+        },
+        "automatizacion": automatizacion,
+        "notificacion": {
+            "canal": "Teams",
+            "operador": "L1",
+            "entregada": True,
+            "timestamp": ts,
+        },
+        "resolucion": resolucion,
+        "mttr_segundos": None,
+        "sox_compliant": True,
+        "origen": "aiops-agent",
+    }
+
+
 def _load_tlnt_catalog() -> dict:
     """Carga el catalogo TLNT desde vars/tlnt_catalog.yml. Cached por proceso."""
     global _TLNT_CATALOG_CACHE
@@ -1589,6 +1731,20 @@ def execute_kql(query: str, workspace_id: Optional[str] = None) -> dict:
 # ============================================================================
 # Tool 2: AWX Job Template
 # ============================================================================
+# Claves de control que viajan en force_extra_vars pero NO son variables de
+# playbook AWX — se filtran antes de inyectar a AWX.
+_AWX_CONTROL_KEYS = {"target_env", "scope"}
+
+
+def _awx_safe_extra_vars(fev: dict) -> dict:
+    """Filtra de force_extra_vars las claves de control y las internas (prefijo _)
+    para que solo lleguen a AWX las variables reales del playbook."""
+    return {
+        k: v for k, v in (fev or {}).items()
+        if not k.startswith("_") and k not in _AWX_CONTROL_KEYS
+    }
+
+
 def run_awx_job_template(
     template_id: int,
     extra_vars: dict = None,
@@ -1606,9 +1762,11 @@ def run_awx_job_template(
     headers = {"Authorization": f"Bearer {ENV['AWX_TOKEN']}"}
     extra_vars = dict(extra_vars or {})
 
-    # Sobrescribir lo que el LLM paso con los valores forzados (filtros UI)
+    # Sobrescribir lo que el LLM paso con los valores forzados (filtros UI),
+    # EXCLUYENDO claves de control internas que no son variables del playbook
+    # (target_env, scope, y cualquier _interna como _elk_alert/_incident_id).
     if force_extra_vars:
-        extra_vars.update(force_extra_vars)
+        extra_vars.update(_awx_safe_extra_vars(force_extra_vars))
 
     # ====================================================================
     # SAFETY GUARD (capa determinista, defensa en profundidad)
@@ -2240,6 +2398,50 @@ TOOL_DETECT_ANOMALIES = FunctionTool(
     strict=True,
 )
 
+TOOL_REPORT_INCIDENT = FunctionTool(
+    name="report_incident",
+    description=(
+        "Reporta el resultado de una investigacion de alerta al Panel de "
+        "Aprobacion AIOps (human-in-the-loop). USALA AL FINAL cuando investigas "
+        "una alerta de monitoreo (ELK), tras determinar el veredicto. El panel "
+        "registra el incidente y, si propones remediacion, lo deja esperando "
+        "aprobacion de un operador humano antes de ejecutar. "
+        "NO la uses en consultas manuales del dashboard — solo en alertas."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "causa_raiz": {
+                "type": "string",
+                "description": "Causa raiz identificada (1-2 frases concisas). Si fue falso positivo, indicalo.",
+            },
+            "confianza_pct": {
+                "type": "integer",
+                "description": "Tu confianza en el diagnostico, 0-100. Alta (>80) si los datos son concluyentes; baja si es inferencia.",
+            },
+            "categoria": {
+                "type": "string",
+                "description": "Categoria del incidente: infraestructura | aplicacion | base_datos | seguridad | red",
+            },
+            "error_code": {
+                "type": "string",
+                "description": "Codigo TLNT-XXX principal detectado, si aplica (ej. 'TLNT-015'). Vacio si no hay.",
+            },
+            "requiere_remediacion": {
+                "type": "boolean",
+                "description": "true si hay un problema real que amerita ejecutar un playbook. false si es falso positivo o solo informativo.",
+            },
+            "playbook": {
+                "type": "string",
+                "description": "Nombre del playbook propuesto si requiere_remediacion=true (ej. 'talento-aci-restart'). Vacio si no aplica.",
+            },
+        },
+        "required": ["causa_raiz", "confianza_pct", "categoria", "error_code", "requiere_remediacion", "playbook"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 
 def build_tool_run_awx() -> FunctionTool:
     """Tool spec con descripcion construida con los JT IDs activos."""
@@ -2353,6 +2555,7 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_LOOKUP_INFRA,       # v21: ARM directo (ACI/AppService/Storage/Network/Quotas)
         TOOL_LOOKUP_SQL,         # v21: SQL Servers + databases + diagnostics KQL
         TOOL_DETECT_ANOMALIES,   # v21: series_decompose_anomalies en 3 metricas
+        TOOL_REPORT_INCIDENT,    # v22: reporta al Panel de Aprobacion AIOps (ELK)
         TOOL_QUERY_LA,
         build_tool_run_awx(),
     ]
@@ -2918,6 +3121,67 @@ def process_response_items(
                     "call_id": item.call_id,
                     "output": _kql_result_to_payload(result),
                 })
+
+            # ---- report_incident → Panel de Aprobacion AIOps ----
+            elif item.name == "report_incident":
+                fev = force_extra_vars or {}
+                elk_alert = fev.get("_elk_alert") or {}
+                incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}"
+                causa = args.get("causa_raiz", "")
+                conf = int(args.get("confianza_pct") or 0)
+                cat = args.get("categoria", "") or _categoria_from_metric(elk_alert.get("metric", ""))
+                ecode = (args.get("error_code", "") or "").strip()
+                req_rem = bool(args.get("requiere_remediacion"))
+                pbook = (args.get("playbook", "") or "").strip() or None
+                print(f"     REPORT_INCIDENT incident={incident_id} cat={cat} conf={conf}% remediacion={req_rem}")
+                _emit(emit, {
+                    "type": "tool.call", "hop": hop, "tool": "report_incident",
+                    "args": {"causa_raiz": causa[:80], "confianza_pct": conf,
+                             "categoria": cat, "requiere_remediacion": req_rem, "playbook": pbook},
+                })
+                payload = build_incident_payload(
+                    incident_id=incident_id, alert=elk_alert, causa_raiz=causa,
+                    confianza_pct=conf, categoria=cat, error_code=ecode,
+                    playbook=pbook, requiere_remediacion=req_rem,
+                    tiempo_ms=int((time.time() - (fev.get("_t_start") or time.time())) * 1000),
+                )
+                t0 = time.time()
+                panel_resp = post_incident_to_panel(payload)
+                elapsed = time.time() - t0
+                if "error" in panel_resp:
+                    _emit(emit, {"type": "tool.panel.error", "hop": hop,
+                                 "error": panel_resp["error"], "elapsed_seconds": round(elapsed, 1)})
+                    result = {"reported": False, "error": panel_resp["error"]}
+                else:
+                    estado_real = payload["automatizacion"]["estado"]
+                    espera_aprobacion = (estado_real == "pendiente_aprobacion")
+                    _emit(emit, {"type": "tool.panel.done", "hop": hop,
+                                 "index": panel_resp.get("index"), "incident_id": incident_id,
+                                 "estado": estado_real,
+                                 "requiere_aprobacion": espera_aprobacion,
+                                 "playbook": pbook,
+                                 "elapsed_seconds": round(elapsed, 1)})
+                    if espera_aprobacion:
+                        nota = f"Incidente registrado. Playbook '{pbook}' esperando aprobacion de operador L1 en el panel."
+                    elif req_rem and not pbook:
+                        nota = ("Incidente registrado como informativo: identificaste remediacion necesaria "
+                                "pero sin un playbook del catalogo (restart/stop/start, sql-diagnostics, nsg-block-ip). "
+                                "La accion sugerida se escala al equipo correspondiente.")
+                    else:
+                        nota = "Incidente registrado como diagnostico informativo (sin remediacion)."
+                    result = {
+                        "reported": True,
+                        "incident_id": incident_id,
+                        "index": panel_resp.get("index"),
+                        "estado": estado_real,
+                        "nota": nota,
+                    }
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+
             elif item.name == "run_awx_job_template":
                 tpl = args.get("template_id")
                 # extra_vars_json viene como string JSON desde el agente
@@ -2930,7 +3194,7 @@ def process_response_items(
                 # para que la UI muestre EXACTAMENTE lo que viajara a AWX.
                 effective_ev = dict(ev)
                 if force_extra_vars:
-                    effective_ev.update(force_extra_vars)
+                    effective_ev.update(_awx_safe_extra_vars(force_extra_vars))
                 if tpl in TEMPLATES_NEEDING_AZURE_CREDS:
                     for env_key, ev_key in (
                         ("ACI_NAME", "container_name"),

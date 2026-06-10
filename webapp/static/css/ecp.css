@@ -1554,3 +1554,61 @@ details[open] > .ecp-group__header::before { transform: rotate(90deg); }
 .ecp-filterbar__group--inactive {
   opacity: 0.38;
 }
+
+/* ============================================================================
+   Simulación ELK — grupo, tarjetas, flujo visual, badges
+   ============================================================================ */
+.ecp-group__header--elk { border-left-color: var(--ecp-orange); }
+.ecp-elk-loading { padding: 10px 14px; font-size: 12px; color: var(--text-muted, #6c757d); font-style: italic; }
+
+/* tarjeta de alerta ELK */
+.ecp-sidebar-card--elk { position: relative; }
+.ecp-elk-sev {
+  display: inline-block; margin-left: 6px; padding: 0 6px;
+  border-radius: 8px; font-size: 9px; font-weight: 700;
+  text-transform: uppercase; vertical-align: middle;
+}
+.ecp-elk-sev--high     { background: #fde2e2; color: #c0392b; }
+.ecp-elk-sev--critical { background: #c0392b; color: #fff; }
+.ecp-elk-sev--medium   { background: #fff3cd; color: #856404; }
+.ecp-elk-sev--low      { background: #d4f1e1; color: #1f7a4d; }
+
+/* panel de flujo ELK en el área de contenido */
+.ecp-elk-flow {
+  background: linear-gradient(135deg, #fff8f0 0%, #fff 100%);
+  border: 1px solid #ffd9b3;
+  border-left: 4px solid var(--ecp-orange);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.ecp-elk-flow__steps {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; flex-wrap: wrap;
+}
+.ecp-elk-step {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; min-width: 110px; padding: 8px 12px;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px;
+}
+.ecp-elk-step__icon { font-size: 22px; }
+.ecp-elk-step__label { font-size: 11px; font-weight: 700; color: var(--ecp-dark-teal); margin-top: 2px; }
+.ecp-elk-step__detail { font-size: 10px; color: var(--text-muted, #6c757d); margin-top: 1px; }
+.ecp-elk-step--source { border-color: var(--ecp-orange); }
+.ecp-elk-step--agent  { border-color: var(--ecp-dark-teal); }
+.ecp-elk-arrow { font-size: 20px; color: var(--ecp-orange); font-weight: 700; }
+
+.ecp-elk-payload { margin-top: 12px; }
+.ecp-elk-payload summary {
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  color: var(--ecp-dark-teal); padding: 4px 0;
+}
+.ecp-elk-payload pre {
+  background: #1f2a2a; color: #d4f1e1; padding: 12px;
+  border-radius: 6px; font-size: 11px; overflow-x: auto;
+  margin: 8px 0; line-height: 1.4;
+}
+.ecp-elk-payload__path {
+  font-size: 11px; color: var(--text); background: #f0f6f4;
+  border-radius: 4px; padding: 6px 10px;
+}

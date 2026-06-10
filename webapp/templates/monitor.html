@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TALENTO — Monitor en Vivo (ELK)</title>
+  <link rel="stylesheet" href="/static/css/ecp.css?v={{ asset_version }}">
+  <link rel="icon" href="/static/img/logo-placeholder.svg" type="image/svg+xml">
+  <style>
+    .mon-body { background: #0a1614; color: #d4f1e1; min-height: 100vh; font-family: Verdana, sans-serif; }
+    .mon-header {
+      background: var(--ecp-dark-teal); color: #fff; padding: 14px 28px;
+      display: flex; align-items: center; gap: 16px; box-shadow: 0 2px 0 var(--ecp-yellow);
+    }
+    .mon-header__title { font-size: 18px; font-weight: 700; flex: 1; }
+    .mon-live { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .mon-live__dot { width: 12px; height: 12px; border-radius: 50%; background: #4ade80; animation: monpulse 1.5s infinite; }
+    @keyframes monpulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.3)} }
+    .mon-conn { font-size: 11px; opacity: .7; }
+    .mon-stats { display: flex; gap: 28px; padding: 12px 28px; background: #06100e; border-bottom: 1px solid #1a2e2a; }
+    .mon-stat__num { font-size: 26px; font-weight: 700; color: var(--ecp-yellow); }
+    .mon-stat__label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; opacity: .6; }
+    .mon-feed { padding: 20px 28px; max-width: 1400px; margin: 0 auto; }
+    .mon-empty { text-align: center; padding: 80px 20px; opacity: .5; font-size: 14px; }
+    .mon-empty code { background:#13211d; padding:2px 8px; border-radius:4px; color: var(--ecp-lime); }
+
+    /* tarjeta de incidente */
+    .mon-incident {
+      background: #0f1f1c; border: 1px solid #1f3833; border-left: 4px solid var(--ecp-orange);
+      border-radius: 8px; margin-bottom: 16px; overflow: hidden; animation: monslide .3s ease;
+    }
+    @keyframes monslide { from{opacity:0;transform:translateY(-10px)} to{opacity:1;transform:none} }
+    .mon-incident--high     { border-left-color: #f87171; }
+    .mon-incident--critical { border-left-color: #dc2626; box-shadow: 0 0 0 1px rgba(220,38,38,.3); }
+    .mon-incident--medium   { border-left-color: #fbbf24; }
+    .mon-incident__head { display:flex; align-items:center; gap:12px; padding:12px 16px; background:#13211d; }
+    .mon-sev { padding: 2px 9px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .mon-sev--high     { background:#fee2e2; color:#b91c1c; }
+    .mon-sev--critical { background:#dc2626; color:#fff; }
+    .mon-sev--medium   { background:#fef3c7; color:#92400e; }
+    .mon-sev--low      { background:#d1fae5; color:#065f46; }
+    .mon-incident__rule { font-weight:700; color:#fff; font-size:14px; flex:1; }
+    .mon-incident__time { font-size:11px; opacity:.5; }
+    .mon-incident__meta { display:flex; gap:20px; padding:10px 16px; font-size:12px; flex-wrap:wrap; border-bottom:1px solid #1a2e2a; }
+    .mon-incident__meta b { color: var(--ecp-lime); }
+    .mon-incident__body { padding: 12px 16px; }
+    .mon-step {
+      display:flex; align-items:flex-start; gap:10px; padding:5px 0; font-size:12px;
+      animation: monslide .2s ease;
+    }
+    .mon-step__icon { width:20px; text-align:center; flex-shrink:0; }
+    .mon-step__txt { flex:1; }
+    .mon-step--tool .mon-step__txt { color: #7dd3fc; }
+    .mon-step--done .mon-step__txt { color: #4ade80; }
+    .mon-step--final { background:#0d2920; border-radius:6px; padding:10px 12px; margin-top:8px; color:#d4f1e1; }
+    .mon-step--final .mon-step__txt { white-space: pre-wrap; line-height:1.5; }
+    .mon-badge-proc { font-size:10px; color: var(--ecp-yellow); animation: monpulse 1.2s infinite; }
+    .mon-foot { text-align:center; padding:16px; font-size:11px; opacity:.4; }
+    .mon-link { color: var(--ecp-lime); text-decoration:none; }
+  </style>
+</head>
+<body class="mon-body">
+  <header class="mon-header">
+    <span style="font-size:24px;">📡</span>
+    <div class="mon-header__title">TALENTO — Monitor en Vivo · Alertas ELK</div>
+    <div class="mon-live"><span class="mon-live__dot" id="liveDot"></span><span id="connTxt">Conectando…</span></div>
+  </header>
+
+  <div class="mon-stats">
+    <div><div class="mon-stat__num" id="statAlerts">0</div><div class="mon-stat__label">Alertas recibidas</div></div>
+    <div><div class="mon-stat__num" id="statActive">0</div><div class="mon-stat__label">Investigando</div></div>
+    <div><div class="mon-stat__num" id="statTools">0</div><div class="mon-stat__label">Tools ejecutadas</div></div>
+    <div style="margin-left:auto; align-self:center;"><a class="mon-link" href="/">← Volver al dashboard</a></div>
+  </div>
+
+  <div class="mon-feed" id="feed">
+    <div class="mon-empty" id="empty">
+      Esperando alertas de ELK…<br><br>
+      Dispara una con:<br>
+      <code>python3 scripts/simulate-elk-alert.py --http http://localhost:8000 error_rate</code><br><br>
+      o desde ELK / curl haciendo <code>POST /api/elk/ingest</code>
+    </div>
+  </div>
+
+  <div class="mon-foot">El agente investiga en tiempo real · cada alerta entra por <code>/api/elk/ingest</code></div>
+
+  <script>
+  (function(){
+    const feed = document.getElementById('feed');
+    const empty = document.getElementById('empty');
+    const incidents = {};  // incident_id → {el, tools}
+    let totalAlerts = 0, totalTools = 0, activeCount = 0;
+
+    const $ = id => document.getElementById(id);
+    function bump(id, n){ $(id).textContent = n; }
+
+    function sevClass(sev){ return ['high','critical','medium','low'].includes((sev||'').toLowerCase()) ? (sev||'').toLowerCase() : 'low'; }
+    function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function now(){ return new Date().toLocaleTimeString('es-CO'); }
+
+    function ensureIncident(ev){
+      const id = ev.incident_id;
+      if (incidents[id]) return incidents[id];
+      if (empty) empty.style.display = 'none';
+      const sev = sevClass(ev.severity);
+      const node = document.createElement('div');
+      node.className = `mon-incident mon-incident--${sev}`;
+      node.innerHTML = `
+        <div class="mon-incident__head">
+          <span class="mon-sev mon-sev--${sev}">${esc(ev.severity||'?')}</span>
+          <span class="mon-incident__rule">🔔 ${esc(ev.rule||'alerta')}</span>
+          <span class="mon-badge-proc" data-proc="${id}">● investigando</span>
+          <span class="mon-incident__time">${now()}</span>
+        </div>
+        <div class="mon-incident__meta">
+          <span>Métrica: <b>${esc(ev.metric||'?')}</b></span>
+          <span>Recurso: <b>${esc(ev.resource||'?')}</b></span>
+          <span>Fuente: <b>${esc(ev.source||'elk')}</b></span>
+          <span>Incidente: <b>${esc(id)}</b></span>
+        </div>
+        <div class="mon-incident__body" data-body="${id}">
+          <div class="mon-step"><span class="mon-step__icon">🎯</span><span class="mon-step__txt">Punto de partida: ${esc(ev.suggested_path||'')}</span></div>
+        </div>`;
+      feed.insertBefore(node, feed.firstChild);
+      incidents[id] = { el: node, tools: 0 };
+      totalAlerts++; activeCount++;
+      bump('statAlerts', totalAlerts); bump('statActive', activeCount);
+      return incidents[id];
+    }
+
+    function addStep(id, icon, txt, cls){
+      const inc = incidents[id]; if(!inc) return;
+      const body = inc.el.querySelector(`[data-body="${id}"]`);
+      const step = document.createElement('div');
+      step.className = `mon-step ${cls||''}`;
+      step.innerHTML = `<span class="mon-step__icon">${icon}</span><span class="mon-step__txt">${txt}</span>`;
+      body.appendChild(step);
+    }
+
+    function finishIncident(id){
+      const inc = incidents[id]; if(!inc) return;
+      const proc = inc.el.querySelector(`[data-proc="${id}"]`);
+      if (proc){ proc.textContent = '✓ resuelto'; proc.style.color = '#4ade80'; proc.style.animation='none'; }
+      activeCount = Math.max(0, activeCount-1); bump('statActive', activeCount);
+    }
+
+    function handle(ev){
+      const t = ev.type;
+      if (t === 'elk.alert.received') { ensureIncident(ev); }
+      else if (t === 'tool.call') {
+        const inc = incidents[ev.incident_id]; if(!inc) return;
+        inc.tools++; totalTools++; bump('statTools', totalTools);
+        const args = ev.args ? JSON.stringify(ev.args).slice(0,80) : '';
+        addStep(ev.incident_id, '🛠️', `<b>${esc(ev.tool)}</b> <span style="opacity:.6">${esc(args)}</span>`, 'mon-step--tool');
+      }
+      else if (t === 'agent.hop') { addStep(ev.incident_id, '🔄', `Hop ${ev.hop} — razonando…`); }
+      else if (t === 'tool.arm.done' || t === 'tool.kql.done' || t === 'tool.runtime.done' || t === 'tool.ai.done') {
+        addStep(ev.incident_id, '✓', `${esc(ev.mode||ev.tool||'consulta')} OK (${ev.elapsed_seconds||'?'}s)`, 'mon-step--done');
+      }
+      else if (t === 'tool.awx.done') { addStep(ev.incident_id, '⚙️', `Playbook AWX ${esc(ev.job_id)} — ${esc(ev.status)} (dry-run)`, 'mon-step--done'); }
+      else if (t === 'agent.final') {
+        addStep(ev.incident_id, '🦎', esc((ev.text||'').slice(0,800)), 'mon-step--final');
+        finishIncident(ev.incident_id);
+      }
+      else if (t === 'agent.error') { addStep(ev.incident_id, '💥', `Error: ${esc(ev.error)}`); finishIncident(ev.incident_id); }
+      else if (t === 'done') { finishIncident(ev.incident_id); }
+    }
+
+    function connect(){
+      const es = new EventSource('/api/elk/feed');
+      es.addEventListener('hello', () => { $('liveDot').style.background='#4ade80'; $('connTxt').textContent='En vivo'; });
+      es.onmessage = (e) => { let ev; try{ ev=JSON.parse(e.data); }catch{ return; } if(ev.type) handle(ev); };
+      es.onerror = () => { $('liveDot').style.background='#f87171'; $('connTxt').textContent='Reconectando…'; };
+    }
+    connect();
+  })();
+  </script>
+</body>
+</html>

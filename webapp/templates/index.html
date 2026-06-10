@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TALENTO — Centro de Mando IA</title>
-  <link rel="stylesheet" href="/static/css/ecp.css">
+  <link rel="stylesheet" href="/static/css/ecp.css?v={{ asset_version }}">
   <link rel="icon" href="/static/img/logo-placeholder.svg" type="image/svg+xml">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -79,6 +79,15 @@
 
     <!-- ============ Sidebar con grupos colapsables ============ -->
     <aside class="ecp-sidebar" id="sidebar">
+
+      <!-- GRUPO: Simulación ELK (flujo de producción) -->
+      <details class="ecp-group" open>
+        <summary class="ecp-group__header ecp-group__header--elk">🔔 Simulación ELK</summary>
+        <div class="ecp-group__list" id="elkAlertsList">
+          <!-- Poblado dinámicamente por ecp.js desde /api/elk/alerts -->
+          <div class="ecp-elk-loading">Cargando alertas…</div>
+        </div>
+      </details>
 
       <!-- GRUPO: Salud del Sistema -->
       <details class="ecp-group" open>
@@ -241,6 +250,36 @@
         </div>
       </div>
 
+      <!-- Panel de alerta ELK (visible solo cuando el run viene de ELK) -->
+      <div class="ecp-elk-flow" id="elkFlow" style="display:none;">
+        <div class="ecp-elk-flow__steps">
+          <div class="ecp-elk-step ecp-elk-step--source">
+            <div class="ecp-elk-step__icon">🔔</div>
+            <div class="ecp-elk-step__label">ELK detecta</div>
+            <div class="ecp-elk-step__detail" id="elkStepRule">regla</div>
+          </div>
+          <div class="ecp-elk-arrow">→</div>
+          <div class="ecp-elk-step ecp-elk-step--payload">
+            <div class="ecp-elk-step__icon">📨</div>
+            <div class="ecp-elk-step__label">POST /api/run</div>
+            <div class="ecp-elk-step__detail" id="elkStepMetric">metric</div>
+          </div>
+          <div class="ecp-elk-arrow">→</div>
+          <div class="ecp-elk-step ecp-elk-step--agent">
+            <div class="ecp-elk-step__icon">🦎</div>
+            <div class="ecp-elk-step__label">Agente investiga</div>
+            <div class="ecp-elk-step__detail">recursivo</div>
+          </div>
+        </div>
+        <details class="ecp-elk-payload">
+          <summary>Ver payload que ELK envió</summary>
+          <pre id="elkPayloadJson"></pre>
+          <div class="ecp-elk-payload__path">
+            <strong>Punto de partida sugerido:</strong> <span id="elkSuggestedPath"></span>
+          </div>
+        </details>
+      </div>
+
       <div class="ecp-timeline-wrap" id="timelineWrap" style="display:none;">
         <h3 class="ecp-section-title">⛓️ Línea de tiempo del agente
           <span class="ecp-section-env" id="timelineEnvBadge"></span>
@@ -294,7 +333,7 @@
     <strong>Ecopetrol S.A.</strong> · Demo interna de capacidades agentic AI · NTT DATA · 2026
   </footer>
 
-  <script src="/static/js/renderers.js"></script>
-  <script src="/static/js/ecp.js"></script>
+  <script src="/static/js/renderers.js?v={{ asset_version }}"></script>
+  <script src="/static/js/ecp.js?v={{ asset_version }}"></script>
 </body>
 </html>

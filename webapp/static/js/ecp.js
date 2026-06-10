@@ -59,6 +59,12 @@
     activeFiltersHint: document.getElementById('activeFiltersHint'),
     modalTitle: document.getElementById('modalTitle'),
     modalHint: document.getElementById('modalHint'),
+    elkAlertsList: document.getElementById('elkAlertsList'),
+    elkFlow: document.getElementById('elkFlow'),
+    elkStepRule: document.getElementById('elkStepRule'),
+    elkStepMetric: document.getElementById('elkStepMetric'),
+    elkPayloadJson: document.getElementById('elkPayloadJson'),
+    elkSuggestedPath: document.getElementById('elkSuggestedPath'),
   };
 
   // -------------------------------------------------------------------------
@@ -132,6 +138,117 @@
   function updateScopeVisibility(scenarioId) {
     if (!el.scopeGroup) return;
     el.scopeGroup.style.display = scenarioId === 'infra-health-check' ? 'flex' : 'none';
+  }
+
+  // -------------------------------------------------------------------------
+  // Alertas ELK — carga el catálogo y renderiza las tarjetas
+  // -------------------------------------------------------------------------
+  const SEV_CLASS = { high: 'card-alert', critical: 'card-critical', medium: 'card-warning', low: 'card-info' };
+
+  async function loadElkAlerts() {
+    if (!el.elkAlertsList) return;
+    try {
+      const r = await fetch('/api/elk/alerts');
+      const d = await r.json();
+      el.elkAlertsList.innerHTML = (d.alerts || []).map(a => `
+        <article class="ecp-sidebar-card ${SEV_CLASS[a.severity] || 'card-info'} ecp-sidebar-card--elk"
+                 data-elk-alert-id="${a.id}"
+                 title="${escapeHtml(a.rule)} — severidad ${a.severity}">
+          <div class="ecp-sidebar-card__spinner"></div>
+          <div class="ecp-sidebar-card__icon">${a.icon}</div>
+          <div class="ecp-sidebar-card__body">
+            <div class="ecp-sidebar-card__title">${escapeHtml(a.title)}
+              <span class="ecp-elk-sev ecp-elk-sev--${a.severity}">${a.severity}</span>
+            </div>
+            <div class="ecp-sidebar-card__sub">${escapeHtml(a.subtitle)}</div>
+          </div>
+        </article>
+      `).join('');
+    } catch (err) {
+      el.elkAlertsList.innerHTML = '<div class="ecp-elk-loading">Error cargando alertas ELK</div>';
+    }
+  }
+
+  // Click en alerta ELK
+  if (el.elkAlertsList) {
+    el.elkAlertsList.addEventListener('click', (e) => {
+      const card = e.target.closest('[data-elk-alert-id]');
+      if (!card || card.classList.contains('is-running')) return;
+      runElkAlert(card, card.dataset.elkAlertId);
+    });
+  }
+
+  async function runElkAlert(card, alertId) {
+    if (state.activeRunId) {
+      alert('Hay un escenario en ejecución. Espera o ciérralo.');
+      return;
+    }
+    card.classList.add('is-running');
+    state.activeCard = card;
+    state.activeRenderer = 'generic';
+    state.awxUrl = null;
+    state.artifacts = {};
+
+    // Layout: ocultar welcome/info, mostrar banner + flujo ELK + timeline
+    el.welcome.style.display = 'none';
+    if (el.infoView) el.infoView.style.display = 'none';
+    el.runBanner.style.display = 'flex';
+    el.timelineWrap.style.display = 'block';
+    el.resultWrap.style.display = 'none';
+
+    const cardIcon = card.querySelector('.ecp-sidebar-card__icon').textContent;
+    const cardTitle = card.querySelector('.ecp-sidebar-card__title').textContent.trim();
+    el.runBannerIcon.textContent = cardIcon;
+    el.runBannerTitle.textContent = `🔔 ELK → ${cardTitle}`;
+    if (el.envBadge) { el.envBadge.textContent = '⭐ v2 activo'; el.envBadge.className = 'ecp-env-badge ecp-env-badge--v2'; el.envBadge.style.display = 'inline-block'; }
+
+    el.timeline.innerHTML = '';
+    el.result.innerHTML = '';
+    state.startTime = Date.now();
+    startElapsedTimer();
+
+    let resp;
+    try {
+      resp = await fetch('/api/elk/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_id: alertId }),
+      });
+    } catch (err) {
+      appendTimeline('error', '⚠️', 'No se pudo conectar: ' + err.message);
+      finishRun();
+      return;
+    }
+    if (!resp.ok) {
+      const t = await resp.text();
+      appendTimeline('error', '⚠️', `Error HTTP ${resp.status}: ${t}`);
+      finishRun();
+      return;
+    }
+    const data = await resp.json();
+    state.activeRunId = data.run_id;
+
+    // Mostrar el panel de flujo ELK con el payload
+    if (el.elkFlow) {
+      el.elkFlow.style.display = 'block';
+      if (el.elkStepRule) el.elkStepRule.textContent = data.rule || '';
+      if (el.elkStepMetric) el.elkStepMetric.textContent = (data.alert && data.alert.metric) || '';
+      if (el.elkPayloadJson) el.elkPayloadJson.textContent = JSON.stringify({ alert: data.alert }, null, 2);
+      if (el.elkSuggestedPath) el.elkSuggestedPath.textContent = data.suggested_path || '';
+    }
+
+    appendTimeline('info', '🔔', `Alerta ELK <code>${escapeHtml(data.rule)}</code> recibida — severidad <strong>${escapeHtml(data.alert.severity)}</strong>, métrica <strong>${escapeHtml(data.alert.metric)}</strong>.`);
+    appendTimeline('info', '🟢', `Run iniciado <code>${data.run_id.slice(0,8)}…</code> (flujo ELK → agente)`);
+
+    state.activeEventSource = new EventSource(`/api/run/${data.run_id}/stream`);
+    state.activeEventSource.onmessage = (e) => {
+      let ev; try { ev = JSON.parse(e.data); } catch { return; }
+      handleEvent(ev);
+    };
+    state.activeEventSource.onerror = () => {
+      appendTimeline('error', '⚠️', 'Conexión SSE perdida.');
+      finishRun();
+    };
   }
 
   // Actualizar visibilidad y hints según los filtros que acepta el escenario
@@ -211,6 +328,7 @@
   initConnStatus();
   pollHealth();
   setInterval(pollHealth, 15000);
+  loadElkAlerts();
 
   // -------------------------------------------------------------------------
   // Card click handler
@@ -227,6 +345,8 @@
 
     // Cards de info NO disparan run (las maneja sidebar.addEventListener via data-info-view)
     if (card.dataset.infoView) return;
+    // Cards ELK tienen su propio handler (elkAlertsList) — ignorar aquí
+    if (card.dataset.elkAlertId) return;
 
     // Roadmap (en habilitacion): render explicativo en el panel principal, sin alert nativo.
     if (card.dataset.tier === 'pending') {
@@ -824,6 +944,7 @@
     if (el.smartNav) el.smartNav.style.display = 'none';
     if (el.activeFiltersHint) el.activeFiltersHint.style.display = 'none';
     if (el.scopeRunBtn) el.scopeRunBtn.style.display = 'none';
+    if (el.elkFlow) el.elkFlow.style.display = 'none';
     document.querySelectorAll('.ecp-sidebar-card.is-scope-pending')
       .forEach(c => c.classList.remove('is-scope-pending'));
     state._pendingHealthCard = null;

@@ -66,6 +66,7 @@ async def start_run(
     no_setup: bool = True,
     max_hops: int = 4,
     force_extra_vars: Optional[dict] = None,
+    extra_emit=None,
 ) -> str:
     """Lanza un run del bridge en un thread worker. Devuelve run_id.
 
@@ -75,12 +76,25 @@ async def start_run(
 
     force_extra_vars: dict de valores que el bridge inyectara en CADA
     llamada a run_awx_job_template, sobrescribiendo lo que el LLM proponga.
-    Esto garantiza que los filtros de la UI sean la fuente de verdad,
-    incluso si el modelo ignora el prompt.
+
+    extra_emit: callback opcional que recibe TAMBIEN cada evento (ya scrubbed).
+    Lo usa el Monitor en Vivo para replicar el stream al broadcast feed sin
+    perder el stream normal por run_id.
     """
     loop = asyncio.get_running_loop()
     run_id = bus.register(loop)
-    emit = _make_emit(run_id)
+    base_emit = _make_emit(run_id)
+
+    if extra_emit is not None:
+        def emit(event: dict) -> None:
+            clean = _scrub(event)
+            bus.emit_threadsafe(run_id, clean)
+            try:
+                extra_emit(clean)
+            except Exception:
+                pass
+    else:
+        emit = base_emit
 
     def _worker():
         """Corre en un thread aparte. Aqui llamamos al bridge sincrono."""

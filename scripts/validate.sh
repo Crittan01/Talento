@@ -75,8 +75,12 @@ check "bridge_l2 imports OK"             "PYTHONPATH=function-app ${PYTHON} -c \
   'import bridge_l2'"
 check "bridge_l2.run_cycle emit param"   "PYTHONPATH=function-app ${PYTHON} -c \
   'import bridge_l2, inspect; assert \"emit\" in inspect.signature(bridge_l2.run_cycle).parameters'"
-check "bridge_l2 CATALOG_VERSION v21"    "PYTHONPATH=function-app ${PYTHON} -c \
-  'import bridge_l2; assert bridge_l2.CATALOG_VERSION.startswith(\"v21\"), bridge_l2.CATALOG_VERSION'"
+check "bridge_l2 CATALOG_VERSION v22"    "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert bridge_l2.CATALOG_VERSION.startswith(\"v22\"), bridge_l2.CATALOG_VERSION'"
+check "report_incident tool existe"     "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert hasattr(bridge_l2, \"post_incident_to_panel\") and hasattr(bridge_l2, \"TOOL_REPORT_INCIDENT\")'"
+check "PANEL_INCIDENTE_URL configurado"  "PYTHONPATH=function-app ${PYTHON} -c \
+  'import bridge_l2; assert \"/api/incidente\" in bridge_l2.PANEL_INCIDENTE_URL'"
 check "bridge_l2 JT_IDS tiene 6 JTs"    "PYTHONPATH=function-app ${PYTHON} -c \
   'import bridge_l2; assert len(bridge_l2.JT_IDS)==6, len(bridge_l2.JT_IDS)'"
 check "lookup_infrastructure existe"     "PYTHONPATH=function-app ${PYTHON} -c \
