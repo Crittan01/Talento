@@ -63,7 +63,7 @@ _SNAPSHOT = [
     (0.3, {"type": "done"}),
 ]
 
-# Eventos mock para errors-analysis (JT 49)
+# Eventos mock para errores recientes
 _ERRORS = [
     (0.2, {"type": "agent.received", "question": "[mock] Errores en TALENTO",
            "agent": "talento-triage-agent", "max_hops": 4}),

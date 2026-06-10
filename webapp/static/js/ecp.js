@@ -1163,10 +1163,9 @@
           <h4>Reglas del system prompt (${d.system_prompt_rules.length})</h4>
           <ul class="info-list info-list--rules">${rules}</ul>
 
-          <h4>Job Templates AWX (${d.job_templates.analysis.length + d.job_templates.diagnostic.length + d.job_templates.remediation_invasive.length})</h4>
-          ${renderJtGroup('Análisis de logs (no invasivos)', d.job_templates.analysis)}
-          ${renderJtGroup('Diagnóstico de infraestructura (no invasivos)', d.job_templates.diagnostic)}
-          ${renderJtGroup('Remediación (invasivos, dry_run por defecto)', d.job_templates.remediation_invasive)}
+          <h4>Job Templates AWX — solo remediación (${(d.job_templates.remediation_invasive||[]).length + (d.job_templates.remediation_config||[]).length})</h4>
+          ${renderJtGroup('Remediación invasiva (restart/stop/start, dry_run por defecto)', d.job_templates.remediation_invasive || [])}
+          ${renderJtGroup('Remediación de configuración (dry_run por defecto)', d.job_templates.remediation_config || [])}
 
           <h4>Knowledge Base disponible</h4>
           <ul class="info-list">${kb}</ul>

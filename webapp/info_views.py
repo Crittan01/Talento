@@ -191,26 +191,8 @@ def agent_info() -> dict:
              "summary": "Tras file_search, ejecutar tool live cuando el usuario pide datos actuales."},
         ],
         "job_templates": {
-            "analysis": [
-                {"id": jt_ids.get("jt_workspace_snapshot"), "name": "talento-workspace-snapshot",
-                 "purpose": "Inventario amplio del workspace"},
-                {"id": jt_ids.get("jt_errors_analysis"), "name": "talento-errors-analysis",
-                 "purpose": "ERROR/WARN agrupados"},
-                {"id": jt_ids.get("jt_sox_audit"), "name": "talento-sox-audit",
-                 "purpose": "Auditoria SOX (logins, acciones privilegiadas)"},
-                {"id": jt_ids.get("jt_brute_force"), "name": "talento-brute-force-detector",
-                 "purpose": "Failed logins agrupados por usuario"},
-            ],
-            "diagnostic": [
-                {"id": jt_ids.get("jt_aci_state"), "name": "talento-aci-state",
-                 "purpose": "Estado actual del Container Instance"},
-                {"id": jt_ids.get("jt_appservice_state"), "name": "talento-appservice-state",
-                 "purpose": "Estado del App Service"},
-                {"id": jt_ids.get("jt_sql_health"), "name": "talento-sql-health",
-                 "purpose": "Estado SQL Server + databases"},
-                {"id": jt_ids.get("jt_full_health_check"), "name": "talento-full-health-check",
-                 "purpose": "Orchestrator de los 3 anteriores"},
-            ],
+            # v22: AWX solo para remediaciones. Diagnostico via tools directas
+            # (lookup_infrastructure, lookup_sql, detect_anomalies, etc.).
             "remediation_invasive": [
                 {"id": jt_ids.get("jt_aci_restart"), "name": "talento-aci-restart",
                  "purpose": "Reinicia el Container Instance", "dry_run_default": True},
@@ -220,6 +202,12 @@ def agent_info() -> dict:
                  "purpose": "Inicia el Container Instance", "dry_run_default": True},
                 {"id": jt_ids.get("jt_appservice_restart"), "name": "talento-appservice-restart",
                  "purpose": "Reinicia el App Service", "dry_run_default": True},
+            ],
+            "remediation_config": [
+                {"id": jt_ids.get("jt_sql_diagnostics_enable"), "name": "talento-sql-diagnostics-enable",
+                 "purpose": "Habilita Diagnostic Settings SQL hacia Log Analytics", "dry_run_default": True},
+                {"id": jt_ids.get("jt_nsg_block_ip"), "name": "talento-nsg-block-ip",
+                 "purpose": "Bloquea IP sospechosa en NSG (brute force)", "dry_run_default": True},
             ],
         },
         "knowledge_base": [
