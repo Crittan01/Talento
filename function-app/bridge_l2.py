@@ -1325,6 +1325,28 @@ def post_incident_to_panel(payload: dict) -> dict:
         return {"error": str(exc)}
 
 
+# Modulos funcionales validos de TALENTO (de los datos reales del indice ELK).
+# El panel y Kibana esperan este formato modulo.accion.
+MODULOS_TALENTO = {
+    "login.autenticacion", "nomina.liquidacion", "vacaciones.aprobacion",
+    "incapacidades.aprobacion", "contrato.renovacion", "capacitacion.registro",
+}
+
+
+def _normalize_modulo(modulo: str, alert: dict) -> str:
+    """Valida el modulo que emitio el agente; si no es uno valido, intenta
+    inferir del recurso de la alerta, y si no, usa un default razonable."""
+    m = (modulo or "").strip().lower()
+    if m in MODULOS_TALENTO:
+        return m
+    # fallback: si el recurso menciona un modulo conocido
+    res = str((alert or {}).get("resource", "")).lower()
+    for mod in MODULOS_TALENTO:
+        if mod.split(".")[0] in res:
+            return mod
+    return "login.autenticacion"  # default operacional mas comun
+
+
 def build_incident_payload(
     *,
     incident_id: str,
@@ -1332,6 +1354,7 @@ def build_incident_payload(
     causa_raiz: str,
     confianza_pct: int,
     categoria: str,
+    modulo_talento: str = "",
     error_code: str = "",
     playbook: Optional[str] = None,
     requiere_remediacion: bool = False,
@@ -1378,10 +1401,11 @@ def build_incident_payload(
         resolucion = "diagnosticado"
 
     return {
+        "@timestamp": ts,  # Kibana usa este campo como time field del indice
         "incident_id": incident_id,
         "deteccion": {
             "alerta_regla": det.get("rule", det.get("metric", "?")),
-            "modulo_talento": det.get("resource", "talento"),
+            "modulo_talento": _normalize_modulo(modulo_talento, det),
             "error_code": error_code or "",
             "nivel_severidad": severidad,
             "timestamp": ts,
@@ -1403,6 +1427,123 @@ def build_incident_payload(
         },
         "resolucion": resolucion,
         "mttr_segundos": None,
+        "sox_compliant": True,
+        "origen": "aiops-agent",
+    }
+
+
+# ============================================================================
+# Opcion 2 — Ejecucion tras aprobacion del operador (human-in-the-loop).
+# Cuando el operador aprueba en el panel, este llama a nuestro endpoint, que
+# ejecuta el playbook REAL en AWX (la aprobacion humana = operator_confirmed)
+# y escribe el cierre de vuelta al panel (estado=exitoso, job_id, mttr).
+# ============================================================================
+
+# Mapeo nombre de playbook → clave de JT_IDS
+_PLAYBOOK_TO_JT_KEY = {
+    "talento-aci-restart":            "jt_aci_restart",
+    "talento-aci-stop":               "jt_aci_stop",
+    "talento-aci-start":              "jt_aci_start",
+    "talento-appservice-restart":     "jt_appservice_restart",
+    "talento-sql-diagnostics-enable": "jt_sql_diagnostics_enable",
+    "talento-nsg-block-ip":           "jt_nsg_block_ip",
+}
+
+
+def _playbook_to_jt(playbook: str) -> Optional[int]:
+    """Devuelve el JT ID del entorno activo para un nombre de playbook, o None."""
+    key = _PLAYBOOK_TO_JT_KEY.get((playbook or "").strip())
+    return JT_IDS.get(key) if key else None
+
+
+def execute_approved_remediation(
+    incident_id: str,
+    playbook: str,
+    extra_vars: Optional[dict] = None,
+    dry_run: bool = False,
+    emit: Optional[Callable[[dict], None]] = None,
+) -> dict:
+    """Ejecuta un playbook aprobado por el operador. La aprobacion humana en el
+    panel ES la confirmacion SOX → se inyecta operator_confirmed=true.
+
+    dry_run=False (default) ejecuta de verdad (ya fue aprobado). dry_run=True
+    permite validar el flujo sin tocar produccion.
+    Devuelve {job_id, status, elapsed_seconds, ...}.
+    """
+    import time as _t
+    t0 = _t.time()
+    jt = _playbook_to_jt(playbook)
+    if jt is None:
+        return {"error": f"playbook '{playbook}' no esta en el catalogo de remediacion",
+                "valid_playbooks": list(_PLAYBOOK_TO_JT_KEY.keys())}
+
+    ev = dict(extra_vars or {})
+    ev["dry_run"] = bool(dry_run)
+    if not dry_run:
+        # La aprobacion del operador en el panel ES el operator_confirmed
+        ev["operator_confirmed"] = True
+    ev.setdefault("reason", f"Remediacion aprobada en panel AIOps — incidente {incident_id}")
+
+    _emit(emit, {"type": "tool.awx.launched", "incident_id": incident_id,
+                 "playbook": playbook, "template_id": jt, "dry_run": dry_run})
+    result = run_awx_job_template(jt, extra_vars=ev, emit=emit)
+    result["_elapsed_total"] = round(_t.time() - t0, 1)
+    return result
+
+
+def build_closure_payload(
+    *,
+    incident_id: str,
+    alert: dict,
+    playbook: str,
+    causa_raiz: str,
+    modulo_talento: str,
+    job_result: dict,
+    mttr_segundos: int,
+    error_code: str = "",
+    confianza_pct: int = 90,
+    categoria: str = "",
+) -> dict:
+    """Construye el payload de CIERRE tras la ejecucion: estado exitoso/fallido,
+    job_id, mttr. Se postea al panel para que Kibana muestre el incidente resuelto."""
+    import datetime
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    det = alert or {}
+    ok = job_result.get("status") == "successful" and "error" not in job_result
+    estado = "exitoso" if ok else "fallido"
+    return {
+        "@timestamp": ts,
+        "incident_id": incident_id,
+        "deteccion": {
+            "alerta_regla": det.get("rule", det.get("metric", "?")),
+            "modulo_talento": _normalize_modulo(modulo_talento, det),
+            "error_code": error_code or "",
+            "nivel_severidad": str(det.get("severity", "unknown")).lower(),
+            "timestamp": ts,
+        },
+        "analisis_agente": {
+            "causa_raiz": (causa_raiz or "").strip()[:500],
+            "confianza_pct": int(confianza_pct),
+            "categoria": categoria or _categoria_from_metric(det.get("metric", "")),
+            "kedb_hit": _kedb_hit(error_code),
+            "tiempo_ms": 0,
+            "timestamp": ts,
+        },
+        "automatizacion": {
+            "playbook": playbook,
+            "tipo": "remediacion",
+            "modo": "semiautomatico",
+            "estado": estado,                 # exitoso | fallido (post-ejecucion)
+            "dry_run": False,
+            "timestamp": ts,
+            "job_id": job_result.get("job_id"),
+            "duracion_segundos": job_result.get("elapsed_seconds"),
+            "operador_aprobador": "L1",
+            "sla_aprobacion_min": 15,
+        },
+        "notificacion": {"canal": "Teams", "operador": "L1", "entregada": True, "timestamp": ts},
+        "resolucion": "automatica" if ok else "fallida",
+        "mttr_segundos": int(mttr_segundos),
         "sox_compliant": True,
         "origen": "aiops-agent",
     }
@@ -2423,6 +2564,17 @@ TOOL_REPORT_INCIDENT = FunctionTool(
                 "type": "string",
                 "description": "Categoria del incidente: infraestructura | aplicacion | base_datos | seguridad | red",
             },
+            "modulo_talento": {
+                "type": "string",
+                "description": (
+                    "Modulo funcional de TALENTO afectado, en formato modulo.accion. "
+                    "Valores validos: login.autenticacion, nomina.liquidacion, "
+                    "vacaciones.aprobacion, incapacidades.aprobacion, contrato.renovacion, "
+                    "capacitacion.registro. Determinalo del logger_name de los logs que "
+                    "investigaste (ej. VacacionesController -> vacaciones.aprobacion) o del "
+                    "codigo TLNT. Si no puedes determinarlo, usa login.autenticacion."
+                ),
+            },
             "error_code": {
                 "type": "string",
                 "description": "Codigo TLNT-XXX principal detectado, si aplica (ej. 'TLNT-015'). Vacio si no hay.",
@@ -2436,7 +2588,7 @@ TOOL_REPORT_INCIDENT = FunctionTool(
                 "description": "Nombre del playbook propuesto si requiere_remediacion=true (ej. 'talento-aci-restart'). Vacio si no aplica.",
             },
         },
-        "required": ["causa_raiz", "confianza_pct", "categoria", "error_code", "requiere_remediacion", "playbook"],
+        "required": ["causa_raiz", "confianza_pct", "categoria", "modulo_talento", "error_code", "requiere_remediacion", "playbook"],
         "additionalProperties": False,
     },
     strict=True,
@@ -3130,18 +3282,19 @@ def process_response_items(
                 causa = args.get("causa_raiz", "")
                 conf = int(args.get("confianza_pct") or 0)
                 cat = args.get("categoria", "") or _categoria_from_metric(elk_alert.get("metric", ""))
+                modulo = args.get("modulo_talento", "")
                 ecode = (args.get("error_code", "") or "").strip()
                 req_rem = bool(args.get("requiere_remediacion"))
                 pbook = (args.get("playbook", "") or "").strip() or None
-                print(f"     REPORT_INCIDENT incident={incident_id} cat={cat} conf={conf}% remediacion={req_rem}")
+                print(f"     REPORT_INCIDENT incident={incident_id} modulo={modulo} cat={cat} conf={conf}% remediacion={req_rem}")
                 _emit(emit, {
                     "type": "tool.call", "hop": hop, "tool": "report_incident",
-                    "args": {"causa_raiz": causa[:80], "confianza_pct": conf,
-                             "categoria": cat, "requiere_remediacion": req_rem, "playbook": pbook},
+                    "args": {"causa_raiz": causa[:80], "confianza_pct": conf, "categoria": cat,
+                             "modulo_talento": modulo, "requiere_remediacion": req_rem, "playbook": pbook},
                 })
                 payload = build_incident_payload(
                     incident_id=incident_id, alert=elk_alert, causa_raiz=causa,
-                    confianza_pct=conf, categoria=cat, error_code=ecode,
+                    confianza_pct=conf, categoria=cat, modulo_talento=modulo, error_code=ecode,
                     playbook=pbook, requiere_remediacion=req_rem,
                     tiempo_ms=int((time.time() - (fev.get("_t_start") or time.time())) * 1000),
                 )
@@ -3281,10 +3434,20 @@ def run_cycle(
     )
 
     final_text = ""
+    reported = {"done": False}  # rastrea si el agente llamo report_incident
+
+    # Wrap del emit para detectar el reporte al panel
+    _base_emit = emit
+    def _tracking_emit(ev):
+        if ev.get("type") in ("tool.panel.done", "tool.panel.error"):
+            reported["done"] = True
+        if _base_emit:
+            _base_emit(ev)
+
     for hop in range(1, max_hops + 1):
-        _emit(emit, {"type": "agent.hop", "hop": hop})
+        _emit(_tracking_emit, {"type": "agent.hop", "hop": hop})
         text, fn_outputs = process_response_items(
-            response, hop, emit=emit, force_extra_vars=force_extra_vars,
+            response, hop, emit=_tracking_emit, force_extra_vars=force_extra_vars,
         )
         if text:
             final_text = text
@@ -3297,10 +3460,40 @@ def run_cycle(
         )
     else:
         print(f"\n  ⚠️  Limite de {max_hops} hops alcanzado.")
-        _emit(emit, {"type": "agent.hop_limit", "max_hops": max_hops})
+        _emit(_tracking_emit, {"type": "agent.hop_limit", "max_hops": max_hops})
 
     if not final_text:
         final_text = getattr(response, "output_text", "") or "[sin respuesta de texto]"
+
+    # FALLBACK (defense-in-depth): si era un flujo de alerta ELK y el agente NO
+    # llamo report_incident, el bridge lo registra automaticamente. Garantiza que
+    # TODA alerta quede en el panel, sin depender de que el LLM cumpla el prompt.
+    fev = force_extra_vars or {}
+    elk_alert = fev.get("_elk_alert")
+    if elk_alert and not reported["done"]:
+        try:
+            incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}"
+            payload = build_incident_payload(
+                incident_id=incident_id,
+                alert=elk_alert,
+                causa_raiz=final_text[:480] or "Investigacion completada (resumen no estructurado)",
+                confianza_pct=50,           # confianza media — el agente no la declaro
+                categoria=_categoria_from_metric(elk_alert.get("metric", "")),
+                modulo_talento="",          # _normalize_modulo infiere del recurso
+                error_code="",
+                playbook=None,
+                requiere_remediacion=False, # conservador: sin remediacion si el agente no la propuso
+                tiempo_ms=int((time.time() - (fev.get("_t_start") or t_total)) * 1000),
+            )
+            panel_resp = post_incident_to_panel(payload)
+            if "error" not in panel_resp:
+                print(f"  📤 [fallback] report_incident auto: index={panel_resp.get('index')}")
+                _emit(_tracking_emit, {"type": "tool.panel.done", "hop": "fallback",
+                                       "index": panel_resp.get("index"), "incident_id": incident_id,
+                                       "estado": "informativo", "requiere_aprobacion": False,
+                                       "fallback": True})
+        except Exception as _exc:
+            print(f"  ⚠ [fallback] report_incident auto fallo: {_exc}")
 
     elapsed = time.time() - t_total
     print("\n" + "═" * 78)

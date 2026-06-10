@@ -292,13 +292,21 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"PASO 3 — VEREDICTO: determina si la alerta corresponde a un "
             f"problema REAL o es un FALSO POSITIVO. Justifica con los datos.\n\n"
             f"{remediation_clause}\n\n"
-            f"PASO FINAL OBLIGATORIO — REPORTAR AL PANEL: llama UNA VEZ a "
-            f"report_incident con tu conclusion: causa_raiz, confianza_pct "
-            f"(0-100), categoria (infraestructura/aplicacion/base_datos/seguridad/red), "
-            f"error_code (TLNT-XXX si aplica), requiere_remediacion (true solo si "
-            f"hay problema real con accion correctiva), y playbook propuesto si "
-            f"aplica. Esto registra el incidente en el Panel de Aprobacion AIOps "
-            f"para revision del operador. SIEMPRE reporta, incluso si es falso positivo.\n\n"
+            f"PASO FINAL OBLIGATORIO Y AUTOMATICO — report_incident: tu ULTIMA "
+            f"accion en CADA alerta DEBE ser llamar a la tool report_incident. "
+            f"NO es opcional, NO pidas confirmacion al usuario, NO preguntes "
+            f"'¿apruebas el reporte?' — es el registro automatico del incidente. "
+            f"Llamala SIEMPRE, incluso si es falso positivo (con requiere_remediacion=false). "
+            f"Parametros: causa_raiz, confianza_pct (0-100), categoria "
+            f"(infraestructura/aplicacion/base_datos/seguridad/red), modulo_talento "
+            f"(del logger_name o codigo TLNT: login.autenticacion, nomina.liquidacion, "
+            f"vacaciones.aprobacion, incapacidades.aprobacion, contrato.renovacion, "
+            f"capacitacion.registro), error_code (TLNT-XXX si aplica), "
+            f"requiere_remediacion (true solo si hay problema real con accion del "
+            f"catalogo), playbook (talento-aci-restart/stop/start, "
+            f"talento-appservice-restart, talento-sql-diagnostics-enable, "
+            f"talento-nsg-block-ip; vacio si no aplica). Recien DESPUES de llamar "
+            f"report_incident, escribe tu respuesta final en texto.\n\n"
             f"Responde estructurado: Hallazgo · Causa raiz · Veredicto · Accion propuesta."
         )
 
@@ -532,6 +540,68 @@ def run_agent(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as exc:
         logger.exception("Run fallo")
+        return func.HttpResponse(
+            json.dumps({"error": str(exc), "type": type(exc).__name__}),
+            mimetype="application/json", status_code=500,
+        )
+
+
+@app.route(route="elk/execute", methods=["POST"])
+def elk_execute(req: func.HttpRequest) -> func.HttpResponse:
+    """Opcion 2 — el panel llama aqui cuando el operador APRUEBA una remediacion.
+    Ejecuta el playbook real en AWX (aprobacion = operator_confirmed) y escribe
+    el cierre de vuelta al panel (estado=exitoso/fallido, job_id, mttr)."""
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "Body invalido — debe ser JSON"}),
+            mimetype="application/json", status_code=400,
+        )
+
+    incident_id = body.get("incident_id", "")
+    playbook = body.get("playbook", "")
+    alert = body.get("alert") or {}
+    dry_run = bool(body.get("dry_run", False))
+
+    if bridge_l2._playbook_to_jt(playbook) is None:
+        return func.HttpResponse(
+            json.dumps({"error": f"playbook '{playbook}' no es del catalogo",
+                        "valid": list(bridge_l2._PLAYBOOK_TO_JT_KEY.keys())}),
+            mimetype="application/json", status_code=400,
+        )
+
+    try:
+        result = bridge_l2.execute_approved_remediation(
+            incident_id=incident_id, playbook=playbook,
+            extra_vars=body.get("extra_vars"), dry_run=dry_run,
+        )
+        if result.get("blocked_by_guard"):
+            return func.HttpResponse(json.dumps(result), mimetype="application/json", status_code=403)
+
+        mttr = int(body.get("mttr_segundos") or result.get("elapsed_seconds") or 0)
+        closure = bridge_l2.build_closure_payload(
+            incident_id=incident_id, alert=alert, playbook=playbook,
+            causa_raiz=body.get("causa_raiz", ""), modulo_talento=body.get("modulo_talento", ""),
+            job_result=result, mttr_segundos=mttr, error_code=body.get("error_code", ""),
+        )
+        panel_resp = bridge_l2.post_incident_to_panel(closure)
+
+        return func.HttpResponse(
+            json.dumps({
+                "status": "ok",
+                "incident_id": incident_id,
+                "playbook": playbook,
+                "ejecucion": closure["automatizacion"]["estado"],
+                "job_id": result.get("job_id"),
+                "dry_run": dry_run,
+                "cierre_index": panel_resp.get("index"),
+                "mttr_segundos": mttr,
+            }, ensure_ascii=False),
+            mimetype="application/json", status_code=200,
+        )
+    except Exception as exc:
+        logger.exception("elk/execute fallo")
         return func.HttpResponse(
             json.dumps({"error": str(exc), "type": type(exc).__name__}),
             mimetype="application/json", status_code=500,
