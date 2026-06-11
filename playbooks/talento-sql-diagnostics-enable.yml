@@ -149,6 +149,11 @@
     # ──────────────────────────────────────────────────────────────────────
     # REAL: crear/actualizar diagnostic settings
     # ──────────────────────────────────────────────────────────────────────
+    - name: Construir lista de logs (portable, sin community.general)
+      ansible.builtin.set_fact:
+        diag_logs: "{{ diag_logs | default([]) + [{'category': item, 'enabled': true}] }}"
+      loop: "{{ diag_categories }}"
+
     - name: "[REAL] Crear/actualizar diagnostic settings"
       ansible.builtin.uri:
         url: >-
@@ -166,9 +171,7 @@
         body:
           properties:
             workspaceId: "{{ target_ws_id }}"
-            logs: >-
-              {{ diag_categories | map('community.general.dict_kv',
-                 {'enabled': true}) | list }}
+            logs: "{{ diag_logs }}"
         status_code: [200, 201]
         timeout: 30
       register: diag_result
