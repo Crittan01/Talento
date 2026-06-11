@@ -1368,6 +1368,10 @@ def build_incident_payload(
     det = alert or {}
     ctx = det.get("context", {}) or {}
     severidad = str(det.get("severity", "unknown")).lower()
+    # source_ip viaja en el context de la alerta (el Watcher ELK lo captura del
+    # brute force) y se propaga a automatizacion.extra_vars para que el panel lo
+    # reenvie a AWX sin que el operador tenga que escribirlo.
+    src_ip = str(ctx.get("source_ip", "") or "").strip()
 
     # automatizacion: si hay playbook propuesto → remediacion pendiente_aprobacion;
     # si no → solo diagnostico (informe, sin accion).
@@ -1384,6 +1388,8 @@ def build_incident_payload(
             "operador_aprobador": "L1",
             "sla_aprobacion_min": 15,
         }
+        if src_ip:
+            automatizacion["extra_vars"] = {"source_ip": src_ip}
         resolucion = "pendiente_aprobacion"
     else:
         automatizacion = {

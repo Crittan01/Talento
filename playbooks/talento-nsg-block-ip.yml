@@ -38,8 +38,10 @@
     is_dry_run:   "{{ dry_run | default(true) | bool }}"
     teams_url:    "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
 
-    # Nombre de la regla: sanitizar IP (puntos → guiones)
-    rule_name: "deny-{{ target_ip | replace('.', '-') | replace(':', '-') }}-{{ reason }}"
+    # Nombre de la regla: SOLO la IP sanitizada (puntos → guiones). El reason
+    # NO va en el nombre (Azure no permite espacios/caracteres en nombres de
+    # recursos); va en la descripcion de la regla.
+    rule_name: "deny-bruteforce-{{ target_ip | replace('.', '-') | replace(':', '-') }}"
 
   tasks:
     - name: Validar vars requeridas

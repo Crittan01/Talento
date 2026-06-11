@@ -256,6 +256,28 @@ def normalize_payload(body: dict) -> Optional[str]:
         ctx      = alert.get("context", {})
         path     = _suggested_path(metric)
 
+        # Brute force: ELK tiene la evidencia de red (azure-eventhub.client_ip)
+        # que el agente NO ve en Azure Log Analytics. Si la alerta trae source_ip,
+        # confiar en ELK y proponer el bloqueo (no marcar falso positivo por no
+        # verlo en Azure).
+        src_ip_alert = str(ctx.get("source_ip", "") or "").strip()
+        is_bruteforce = bool(src_ip_alert) and (
+            "brute" in str(metric).lower() or "auth" in str(metric).lower())
+        bruteforce_clause = ""
+        if is_bruteforce:
+            bruteforce_clause = (
+                f"\n\nNOTA CRITICA — BRUTE FORCE YA DETECTADO POR ELK: el Watcher de "
+                f"ELK detecto multiples fallos de login (HTTP 401) desde la IP "
+                f"{src_ip_alert} en los logs de red (azure-eventhub). ESOS LOGS NO "
+                f"ESTAN en Azure Log Analytics — tus tools de Azure NO los veran, y "
+                f"eso es ESPERADO; NO lo interpretes como falso positivo. ELK ya tiene "
+                f"la evidencia. ACCION REQUERIDA en report_incident: "
+                f"requiere_remediacion=true, playbook='talento-nsg-block-ip', "
+                f"categoria='seguridad', modulo_talento='login.autenticacion', "
+                f"error_code='TLNT-009'. La IP a bloquear ({src_ip_alert}) ya viaja "
+                f"en el contexto; el sistema la propaga al playbook automaticamente."
+            )
+
         # Remediacion condicional segun severidad
         if severity in ("high", "critical", "alta", "critica"):
             remediation_clause = (
@@ -291,7 +313,7 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"dato — reconstruye la causa raiz.\n\n"
             f"PASO 3 — VEREDICTO: determina si la alerta corresponde a un "
             f"problema REAL o es un FALSO POSITIVO. Justifica con los datos.\n\n"
-            f"{remediation_clause}\n\n"
+            f"{remediation_clause}{bruteforce_clause}\n\n"
             f"PASO FINAL OBLIGATORIO Y AUTOMATICO — report_incident: tu ULTIMA "
             f"accion en CADA alerta DEBE ser llamar a la tool report_incident. "
             f"NO es opcional, NO pidas confirmacion al usuario, NO preguntes "
