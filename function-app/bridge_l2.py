@@ -3459,6 +3459,28 @@ def process_response_items(
                                  "requiere_aprobacion": espera_aprobacion,
                                  "playbook": pbook,
                                  "elapsed_seconds": round(elapsed, 1)})
+                    # Notificar a Teams: card con resumen del incidente + boton al
+                    # War Room. Para incidentes accionables avisa "Accion requerida".
+                    try:
+                        _sevmap = {"high": "HIGH", "critical": "HIGH", "alta": "HIGH",
+                                   "critica": "HIGH", "medium": "MEDIUM", "media": "MEDIUM"}
+                        _det = payload.get("deteccion", {}) or {}
+                        _etq = _det.get("recurso_afectado") or _det.get("modulo_talento") or "TALENTO"
+                        _sevkey = str(_det.get("nivel_severidad", "")).lower()
+                        notify_teams_finding(
+                            title=("⚠️ Accion requerida — " if espera_aprobacion
+                                   else "Incidente diagnosticado — ") + _etq,
+                            subtitle=f"{cat} · {incident_id}",
+                            severity=_sevmap.get(_sevkey, "MEDIUM" if espera_aprobacion else "INFO"),
+                            facts=[{"title": "Causa raiz", "value": causa[:200]},
+                                   {"title": "Recomendacion", "value": (recom or "—")[:200]},
+                                   {"title": "Confianza", "value": f"{conf}%"}]
+                                  + ([{"title": "Playbook propuesto", "value": pbook}] if pbook else []),
+                            actions=[{"title": "Abrir Centro de Operaciones",
+                                      "url": "http://48.214.147.7:9200/operaciones"}],
+                        )
+                    except Exception as _te:
+                        print(f"     ⚠ Teams notify falló (no rompe el flow): {_te}")
                     if espera_aprobacion:
                         nota = f"Incidente registrado. Playbook '{pbook}' esperando aprobacion de operador L1 en el panel."
                     elif req_rem and not pbook:
