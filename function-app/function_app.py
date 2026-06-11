@@ -282,8 +282,9 @@ def normalize_payload(body: dict) -> Optional[str]:
                 f"causa_raiz y la recomendacion (ej. 'IP de Cartagena, Colombia')."
             )
 
-        # Remediacion condicional segun severidad
-        if severity in ("high", "critical", "alta", "critica"):
+        # Remediacion condicional segun severidad. Robusto a variantes en
+        # espanol/mayusculas que mandan las reglas de Kibana (CRITICO, ALTA, etc.).
+        if any(k in severity for k in ("high", "critic", "alta", "alto", "sever", "urgen")):
             remediation_clause = (
                 "PASO FINAL — REMEDIACION: Si CONFIRMAS un problema real "
                 "(no falso positivo) y la accion correctiva esta dentro del "

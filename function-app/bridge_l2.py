@@ -1397,7 +1397,17 @@ def build_incident_payload(
     ts = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     det = alert or {}
     ctx = det.get("context", {}) or {}
-    severidad = str(det.get("severity", "unknown")).lower()
+    # Normalizar severidad a valores canonicos (high/medium/low) — las reglas de
+    # Kibana mandan variantes en espanol/mayusculas (CRITICO, ALTA, MEDIA...).
+    _sev_raw = str(det.get("severity", "unknown")).lower().strip()
+    if any(k in _sev_raw for k in ("critic", "alta", "alto", "high", "sever", "urgen")):
+        severidad = "high"
+    elif any(k in _sev_raw for k in ("medi", "warn", "advert", "moder")):
+        severidad = "medium"
+    elif any(k in _sev_raw for k in ("low", "baja", "bajo", "info")):
+        severidad = "low"
+    else:
+        severidad = _sev_raw
     # source_ip viaja en el context de la alerta (el Watcher ELK lo captura del
     # brute force) y se propaga a automatizacion.extra_vars para que el panel lo
     # reenvie a AWX sin que el operador tenga que escribirlo.
