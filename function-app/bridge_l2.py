@@ -119,6 +119,33 @@ ENV = load_env(ENV_PATH)
 # (indice azure-operaciones-aiops-*). Configurable por .env si cambia.
 PANEL_INCIDENTE_URL = ENV.get("PANEL_INCIDENTE_URL", "http://48.214.147.7:9200/api/incidente")
 
+# Proxy de consulta a ELK (azure-eventhub) — el ES escucha solo en localhost de
+# la VM de ELK, inalcanzable desde Azure. El panel (expuesto) lo proxea read-only.
+# Da al agente los datos de red (client_ip, geo, http logs) que Azure enmascara.
+ELK_QUERY_URL = ENV.get("ELK_QUERY_URL", "http://48.214.147.7:9200/api/elk-query")
+ELK_QUERY_TOKEN = ENV.get("ELK_QUERY_TOKEN", "")
+
+
+def lookup_elk(modo: str = "brute_force", ip: str = "", window_min: int = 60,
+               emit: Optional[Callable] = None) -> dict:
+    """Correlaciona datos de red que SOLO viven en ELK (azure-eventhub), via el
+    proxy read-only del panel. Modos: brute_force (top IPs con 401 en login),
+    ip_detail (perfil de una IP: geo, requests, endpoints), http_errors (5xx por
+    endpoint). Azure enmascara client_ip a 0.0.0.0, por eso esta es la unica
+    fuente real de la IP del atacante."""
+    try:
+        resp = requests.post(
+            ELK_QUERY_URL,
+            json={"modo": modo, "ip": ip, "window_min": int(window_min or 60)},
+            headers={"X-Elk-Token": ELK_QUERY_TOKEN, "Content-Type": "application/json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return {"error": f"proxy ELK HTTP {resp.status_code}", "modo": modo}
+        return resp.json()
+    except Exception as exc:
+        return {"error": f"proxy ELK inalcanzable: {exc}", "modo": modo}
+
 
 # ============================================================================
 # Credencial Azure: detecta si estamos en Function (usa User Assigned MI) o
@@ -1359,6 +1386,9 @@ def build_incident_payload(
     playbook: Optional[str] = None,
     requiere_remediacion: bool = False,
     tiempo_ms: int = 0,
+    recomendacion: str = "",
+    fuentes_correlacionadas: Optional[list] = None,
+    timeline_investigacion: Optional[list] = None,
 ) -> dict:
     """Construye el payload del contrato del Panel de Aprobacion a partir de
     los datos de la alerta ELK + el analisis del agente."""
@@ -1423,6 +1453,10 @@ def build_incident_payload(
             "kedb_hit": _kedb_hit(error_code),
             "tiempo_ms": int(tiempo_ms or 0),
             "timestamp": ts,
+            # v23: diagnostico automatico enriquecido (lo consume el War Room)
+            "recomendacion": (recomendacion or "").strip()[:400],
+            "fuentes_correlacionadas": fuentes_correlacionadas or [],
+            "timeline_investigacion": timeline_investigacion or [],
         },
         "automatizacion": automatizacion,
         "notificacion": {
@@ -1489,6 +1523,20 @@ def execute_approved_remediation(
         # La aprobacion del operador en el panel ES el operator_confirmed
         ev["operator_confirmed"] = True
     ev.setdefault("reason", f"Remediacion aprobada en panel AIOps — incidente {incident_id}")
+
+    # Inyectar el TARGET del recurso desde el perfil v2. En produccion los App
+    # Settings ACI_NAME/APPSERVICE_NAME no existen; el target sale del profile,
+    # que tiene los nombres reales de los recursos de la instancia activa (v2).
+    prof = _get_profile("v2")
+    pb = (playbook or "").strip()
+    if pb.startswith("talento-aci-"):
+        ev.setdefault("container_name", prof["aci_name"])
+        ev.setdefault("azure_resource_group", prof["aci_rg"])
+    elif pb == "talento-appservice-restart":
+        ev.setdefault("appservice_name", prof["appservice_name"])
+        ev.setdefault("azure_resource_group", prof["appservice_rg"])
+    elif pb == "talento-sql-diagnostics-enable":
+        ev.setdefault("azure_resource_group", prof["sql_rg"])
 
     _emit(emit, {"type": "tool.awx.launched", "incident_id": incident_id,
                  "playbook": playbook, "template_id": jt, "dry_run": dry_run})
@@ -2508,6 +2556,33 @@ TOOL_LOOKUP_SQL = FunctionTool(
     strict=True,
 )
 
+TOOL_LOOKUP_ELK = FunctionTool(
+    name="lookup_elk",
+    description=(
+        "Correlaciona datos de RED que SOLO viven en ELK (azure-eventhub), no en "
+        "Azure. CRITICO: Azure Log Analytics enmascara la IP del cliente a "
+        "0.0.0.0 — esta tool es la UNICA fuente de la IP real del atacante, su "
+        "geolocalizacion y los HTTP logs. USALA SIEMPRE que investigues seguridad, "
+        "brute force, fallos de login, o errores HTTP. Modos:\n"
+        "  brute_force — top IPs con fallos de login (HTTP 401). Da la IP a bloquear.\n"
+        "  ip_detail   — perfil de una IP (requiere ip): geo (pais/ciudad), total "
+        "requests, status codes, endpoints tocados.\n"
+        "  http_errors — errores 5xx por endpoint.\n"
+        "Encadena: brute_force para hallar la IP → ip_detail para perfilarla."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "modo": {"type": "string", "description": "brute_force | ip_detail | http_errors"},
+            "ip": {"type": "string", "description": "IP a perfilar (solo modo ip_detail; vacio en otros)"},
+            "window_min": {"type": "integer", "description": "Ventana hacia atras en minutos (default 60)"},
+        },
+        "required": ["modo", "ip", "window_min"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 TOOL_DETECT_ANOMALIES = FunctionTool(
     name="detect_anomalies",
     description=(
@@ -2593,8 +2668,17 @@ TOOL_REPORT_INCIDENT = FunctionTool(
                 "type": "string",
                 "description": "Nombre del playbook propuesto si requiere_remediacion=true (ej. 'talento-aci-restart'). Vacio si no aplica.",
             },
+            "recomendacion": {
+                "type": "string",
+                "description": (
+                    "Recomendacion de accion para el operador (1-2 frases claras): "
+                    "que hacer y por que, en lenguaje de negocio. Ej: 'Bloquear la IP "
+                    "200.21.0.1 (Colombia) que acumula 14 intentos fallidos; aprobar "
+                    "nsg-block-ip'. Si es falso positivo, recomienda monitoreo."
+                ),
+            },
         },
-        "required": ["causa_raiz", "confianza_pct", "categoria", "modulo_talento", "error_code", "requiere_remediacion", "playbook"],
+        "required": ["causa_raiz", "confianza_pct", "categoria", "modulo_talento", "error_code", "requiere_remediacion", "playbook", "recomendacion"],
         "additionalProperties": False,
     },
     strict=True,
@@ -2712,6 +2796,7 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_APP_INSIGHTS,
         TOOL_LOOKUP_INFRA,       # v21: ARM directo (ACI/AppService/Storage/Network/Quotas)
         TOOL_LOOKUP_SQL,         # v21: SQL Servers + databases + diagnostics KQL
+        TOOL_LOOKUP_ELK,         # v23: correlacion de red via proxy ELK (azure-eventhub)
         TOOL_DETECT_ANOMALIES,   # v21: series_decompose_anomalies en 3 metricas
         TOOL_REPORT_INCIDENT,    # v22: reporta al Panel de Aprobacion AIOps (ELK)
         TOOL_QUERY_LA,
@@ -3205,6 +3290,33 @@ def process_response_items(
                     "output": _kql_result_to_payload(result),
                 })
 
+            # ---- lookup_elk (correlacion de red via proxy ELK) ----
+            elif item.name == "lookup_elk":
+                modo_elk = (args.get("modo", "brute_force") or "brute_force").strip()
+                ip_elk = (args.get("ip", "") or "").strip()
+                win_elk = int(args.get("window_min") or 60)
+                print(f"     ELK[{modo_elk}] ip={ip_elk or '-'} win={win_elk}m")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_elk",
+                             "args": {"modo": modo_elk, "ip": ip_elk}})
+                _emit(emit, {"type": "tool.elk.fetch", "hop": hop,
+                             "source": f"ELK azure-eventhub ({modo_elk})"})
+                t0 = time.time()
+                result = lookup_elk(modo=modo_elk, ip=ip_elk, window_min=win_elk, emit=emit)
+                elapsed = time.time() - t0
+                if "error" in result:
+                    print(f"     ⚠️  ELK ERROR ({elapsed:.1f}s): {result['error']}")
+                    _emit(emit, {"type": "tool.elk.error", "hop": hop,
+                                 "error": result.get("error"), "elapsed_seconds": round(elapsed, 1)})
+                else:
+                    print(f"     ✓ ELK OK ({elapsed:.1f}s): {modo_elk}")
+                    _emit(emit, {"type": "tool.elk.done", "hop": hop,
+                                 "modo": modo_elk, "elapsed_seconds": round(elapsed, 1)})
+                fn_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": _kql_result_to_payload(result),
+                })
+
             # ---- detect_anomalies (series_decompose_anomalies KQL) ----
             elif item.name == "detect_anomalies":
                 metric = (args.get("metric_type", "error_rate") or "error_rate").strip()
@@ -3292,17 +3404,22 @@ def process_response_items(
                 ecode = (args.get("error_code", "") or "").strip()
                 req_rem = bool(args.get("requiere_remediacion"))
                 pbook = (args.get("playbook", "") or "").strip() or None
-                print(f"     REPORT_INCIDENT incident={incident_id} modulo={modulo} cat={cat} conf={conf}% remediacion={req_rem}")
+                recom = (args.get("recomendacion", "") or "").strip()
+                fuentes = list(fev.get("_fuentes", []))
+                timeline = list(fev.get("_timeline", []))
+                print(f"     REPORT_INCIDENT incident={incident_id} modulo={modulo} cat={cat} conf={conf}% remediacion={req_rem} fuentes={fuentes}")
                 _emit(emit, {
                     "type": "tool.call", "hop": hop, "tool": "report_incident",
                     "args": {"causa_raiz": causa[:80], "confianza_pct": conf, "categoria": cat,
-                             "modulo_talento": modulo, "requiere_remediacion": req_rem, "playbook": pbook},
+                             "modulo_talento": modulo, "requiere_remediacion": req_rem, "playbook": pbook,
+                             "fuentes_correlacionadas": fuentes},
                 })
                 payload = build_incident_payload(
                     incident_id=incident_id, alert=elk_alert, causa_raiz=causa,
                     confianza_pct=conf, categoria=cat, modulo_talento=modulo, error_code=ecode,
                     playbook=pbook, requiere_remediacion=req_rem,
                     tiempo_ms=int((time.time() - (fev.get("_t_start") or time.time())) * 1000),
+                    recomendacion=recom, fuentes_correlacionadas=fuentes, timeline_investigacion=timeline,
                 )
                 t0 = time.time()
                 panel_resp = post_incident_to_panel(payload)
@@ -3441,12 +3558,31 @@ def run_cycle(
 
     final_text = ""
     reported = {"done": False}  # rastrea si el agente llamo report_incident
+    # Acumuladores para el incidente: fuentes correlacionadas + timeline de tools.
+    force_extra_vars = dict(force_extra_vars or {})
+    force_extra_vars.setdefault("_fuentes", [])
+    force_extra_vars.setdefault("_timeline", [])
+    _TOOL_FUENTE = {
+        "lookup_infrastructure": "infraestructura", "lookup_sql": "base_datos",
+        "lookup_runtime_logs": "logs", "lookup_correlation_id": "logs",
+        "tlnt_explorer": "logs", "query_log_analytics": "logs",
+        "user_activity": "logs", "lookup_app_insights": "performance",
+        "detect_anomalies": "anomalias", "lookup_elk": "red",
+    }
 
-    # Wrap del emit para detectar el reporte al panel
+    # Wrap del emit para detectar el reporte al panel y acumular correlacion.
     _base_emit = emit
     def _tracking_emit(ev):
-        if ev.get("type") in ("tool.panel.done", "tool.panel.error"):
+        et = ev.get("type")
+        if et in ("tool.panel.done", "tool.panel.error"):
             reported["done"] = True
+        if et == "tool.call":
+            tn = ev.get("tool", "")
+            f = _TOOL_FUENTE.get(tn)
+            if f and f not in force_extra_vars["_fuentes"]:
+                force_extra_vars["_fuentes"].append(f)
+            if tn and tn != "report_incident":
+                force_extra_vars["_timeline"].append({"hop": ev.get("hop"), "tool": tn})
         if _base_emit:
             _base_emit(ev)
 
@@ -3490,6 +3626,9 @@ def run_cycle(
                 playbook=None,
                 requiere_remediacion=False, # conservador: sin remediacion si el agente no la propuso
                 tiempo_ms=int((time.time() - (fev.get("_t_start") or t_total)) * 1000),
+                recomendacion="Revisar el resumen de la investigacion; el agente no estructuro una recomendacion.",
+                fuentes_correlacionadas=list(fev.get("_fuentes", [])),
+                timeline_investigacion=list(fev.get("_timeline", [])),
             )
             panel_resp = post_incident_to_panel(payload)
             if "error" not in panel_resp:
