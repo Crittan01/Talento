@@ -1446,12 +1446,24 @@ def build_incident_payload(
         }
         resolucion = "diagnosticado"
 
+    # Segregacion modulo vs recurso. El modulo funcional (login, nomina...) aplica
+    # a incidentes de APLICACION/SEGURIDAD. Para INFRA/SQL/RED el campo relevante
+    # es el RECURSO afectado (container, sql server), NO un modulo de negocio —
+    # no forzar login.autenticacion en una alerta de memoria/CPU.
+    categoria_final = categoria or _categoria_from_metric(det.get("metric", ""))
+    recurso_afectado = str(det.get("resource", "") or "").strip()
+    if categoria_final in ("infraestructura", "base_datos", "red"):
+        modulo_final = ""   # el War Room mostrara recurso_afectado en su lugar
+    else:
+        modulo_final = _normalize_modulo(modulo_talento, det)
+
     return {
         "@timestamp": ts,  # Kibana usa este campo como time field del indice
         "incident_id": incident_id,
         "deteccion": {
             "alerta_regla": det.get("rule", det.get("metric", "?")),
-            "modulo_talento": _normalize_modulo(modulo_talento, det),
+            "modulo_talento": modulo_final,
+            "recurso_afectado": recurso_afectado,
             "error_code": error_code or "",
             "nivel_severidad": severidad,
             "timestamp": ts,
@@ -1459,7 +1471,7 @@ def build_incident_payload(
         "analisis_agente": {
             "causa_raiz": (causa_raiz or "").strip()[:500],
             "confianza_pct": int(max(0, min(confianza_pct or 0, 100))),
-            "categoria": categoria or _categoria_from_metric(det.get("metric", "")),
+            "categoria": categoria_final,
             "kedb_hit": _kedb_hit(error_code),
             "tiempo_ms": int(tiempo_ms or 0),
             "timestamp": ts,
