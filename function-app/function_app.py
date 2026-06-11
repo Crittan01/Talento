@@ -111,7 +111,7 @@ def _process_agent_background(user_question: str, target_env: str, elk_alert: Op
         if elk_alert:
             # Contexto para report_incident → Panel de Aprobacion (no viaja a AWX)
             fev["_elk_alert"] = elk_alert
-            fev["_incident_id"] = f"INC-{int(time.time())}"
+            fev["_incident_id"] = f"INC-{int(time.time())}-{os.urandom(2).hex()}"
             fev["_t_start"] = time.time()
         bridge_l2.run_cycle(
             project=project,

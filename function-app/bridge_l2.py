@@ -3418,7 +3418,7 @@ def process_response_items(
             elif item.name == "report_incident":
                 fev = force_extra_vars or {}
                 elk_alert = fev.get("_elk_alert") or {}
-                incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}"
+                incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}-{os.urandom(2).hex()}"
                 causa = args.get("causa_raiz", "")
                 conf = int(args.get("confianza_pct") or 0)
                 cat = args.get("categoria", "") or _categoria_from_metric(elk_alert.get("metric", ""))
@@ -3636,7 +3636,7 @@ def run_cycle(
     elk_alert = fev.get("_elk_alert")
     if elk_alert and not reported["done"]:
         try:
-            incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}"
+            incident_id = fev.get("_incident_id") or f"INC-{int(time.time())}-{os.urandom(2).hex()}"
             payload = build_incident_payload(
                 incident_id=incident_id,
                 alert=elk_alert,
