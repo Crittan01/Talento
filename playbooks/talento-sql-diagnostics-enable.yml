@@ -35,8 +35,11 @@
     sql_rg:       "{{ sql_resource_group | default('rg-central-solucion-talento2') }}"
     sql_db:       "{{ sql_db_name       | default('ecopetroldb2') }}"
 
-    # Workspace 2 (activo con datos vivos) — puede sobreescribirse
-    ws_subscription: "{{ workspace_subscription | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    # Workspace 2 (activo con datos vivos) — puede sobreescribirse.
+    # Usa subscription_id (ya resuelto del azure_subscription_id que inyecta el
+    # bridge); en AWX no existe la env AZURE_SUBSCRIPTION_ID -> daba workspaceId
+    # vacio -> 403 LinkedAuthorizationFailed.
+    ws_subscription: "{{ workspace_subscription | default(subscription_id) }}"
     ws_rg:           "{{ workspace_resource_group | default('rg-central-solucion-talento2') }}"
     ws_name:         "{{ workspace_name | default('law-central-soluciontalento2') }}"
 
