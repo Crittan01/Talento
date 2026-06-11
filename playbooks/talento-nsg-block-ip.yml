@@ -38,10 +38,10 @@
     is_dry_run:   "{{ dry_run | default(true) | bool }}"
     teams_url:    "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
 
-    # Nombre de la regla: SOLO la IP sanitizada (puntos → guiones). El reason
-    # NO va en el nombre (Azure no permite espacios/caracteres en nombres de
-    # recursos); va en la descripcion de la regla.
-    rule_name: "deny-bruteforce-{{ target_ip | replace('.', '-') | replace(':', '-') }}"
+    # Nombre de la regla: FIJO y modular. UNA sola regla acumula TODAS las IPs
+    # bloqueadas en sourceAddressPrefixes (lista), en vez de una regla por IP
+    # (que agotaria el limite de reglas/prioridades del NSG y seria inmanejable).
+    rule_name: "deny-bruteforce-aiops"
 
   tasks:
     - name: Validar vars requeridas
@@ -109,6 +109,21 @@
         rule_already_exists: >-
           {{ rule_name in (nsg_resp.json.properties.securityRules | default([])
              | map(attribute='name') | list) }}
+        regla_match: >-
+          {{ nsg_resp.json.properties.securityRules | default([])
+             | selectattr('name', 'equalto', rule_name) | list }}
+
+    - name: Construir lista acumulada de IPs bloqueadas (modular, sin duplicados)
+      ansible.builtin.set_fact:
+        ips_previas: >-
+          {{ (regla_match[0].properties.sourceAddressPrefixes | default([]))
+             if regla_match else [] }}
+        ips_bloqueadas: >-
+          {{ (((regla_match[0].properties.sourceAddressPrefixes | default([]))
+               if regla_match else []) + [target_ip]) | unique }}
+        ip_ya_bloqueada: >-
+          {{ target_ip in ((regla_match[0].properties.sourceAddressPrefixes | default([]))
+             if regla_match else []) }}
 
     # ──────────────────────────────────────────────────────────────────────
     # DRY-RUN
@@ -121,12 +136,11 @@
           - "════════════════════════════════════════════════════════"
           - "  NSG:           {{ nsg }} ({{ nsg_rg }})"
           - "  IP a bloquear: {{ target_ip }}"
-          - "  Nombre regla:  {{ rule_name }}"
-          - "  Prioridad:     {{ priority }}"
-          - "  Dirección:     Inbound"
-          - "  Acción:        Deny"
-          - "  ¿Ya existe?:   {{ rule_already_exists }}"
-          - "  Reglas custom actuales: {{ existing_rules | join(', ') | default('ninguna') }}"
+          - "  Regla modular: {{ rule_name }} (acumula IPs)"
+          - "  ¿IP ya bloqueada?: {{ ip_ya_bloqueada }}"
+          - "  IPs previas:   {{ ips_previas | join(', ') | default('ninguna') }}"
+          - "  IPs tras esta: {{ ips_bloqueadas | join(', ') }}  (total {{ ips_bloqueadas | length }})"
+          - "  Prioridad:     {{ priority }}  ·  Inbound / Deny"
           - ""
           - "  Para ejecutar de verdad: extra_vars={\"dry_run\": false, \"source_ip\": \"{{ target_ip }}\"}"
       when: is_dry_run
@@ -168,12 +182,13 @@
             protocol:                    "*"
             access:                      "Deny"
             direction:                   "Inbound"
-            sourceAddressPrefix:         "{{ target_ip }}"
+            sourceAddressPrefixes:       "{{ ips_bloqueadas }}"
             sourcePortRange:             "*"
             destinationAddressPrefix:    "*"
             destinationPortRange:        "*"
             description: >-
-              Bloqueo IP sospechosa - {{ reason }} - agente IA TALENTO
+              Bloqueo brute force AIOps - {{ ips_bloqueadas | length }} IP(s) -
+              ultima: {{ target_ip }} ({{ reason }})
         status_code: [200, 201]
         timeout: 30
       register: rule_result
@@ -190,8 +205,9 @@
           priority: "{{ priority }}"
           http_status: "{{ rule_result.status | default('?') }}"
           message: >-
-            Regla DENY inbound agregada para {{ target_ip }} en {{ nsg }}.
-            Para revertir: eliminar regla {{ rule_name }} del NSG.
+            IP {{ target_ip }} agregada a la regla modular {{ rule_name }}
+            ({{ ips_bloqueadas | length }} IP(s) bloqueadas en total). Para revertir
+            esta IP: quitarla de sourceAddressPrefixes de la regla.
       when: not is_dry_run
 
     # ──────────────────────────────────────────────────────────────────────
