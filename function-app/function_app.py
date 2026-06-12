@@ -332,7 +332,11 @@ def normalize_payload(body: dict) -> Optional[str]:
                 f"requiere_remediacion=true, confianza_pct>=80, y propon el playbook "
                 f"adecuado — 'talento-nsg-block-ip' si el vector es una IP de red, o "
                 f"'talento-sql-disable-login' para deshabilitar el login de BD. NO lo "
-                f"marques 'informativo'. Incluye geo y patron en la causa_raiz."
+                f"marques 'informativo'. Incluye geo y patron en la causa_raiz.\n"
+                f"IMPORTANTE: tu trabajo es DIAGNOSTICAR y PROPONER, NO ejecutar. NO "
+                f"llames run_awx_job_template tu mismo — la ejecucion la hace el operador "
+                f"L1 tras aprobar. Solo deja la propuesta en report_incident "
+                f"(requiere_remediacion=true + el playbook)."
             )
 
         # Remediacion condicional segun severidad. Robusto a variantes en
