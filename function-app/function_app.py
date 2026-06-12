@@ -339,6 +339,33 @@ def normalize_payload(body: dict) -> Optional[str]:
                 f"(requiere_remediacion=true + el playbook)."
             )
 
+        # Proceso de negocio CRITICO fallando (p.ej. Cierre de Mes). Es diagnostico
+        # + escalamiento: normalmente NO hay playbook de catalogo (un 403 = permisos).
+        proc_name = str(ctx.get("proceso", "") or "").strip()
+        proc_endpoint = str(ctx.get("endpoint", "") or "").strip()
+        proc_status = str(ctx.get("status", "") or "").strip()
+        is_proc = "proceso_critico" in _ml or "cierre" in _ml or bool(proc_name)
+        proc_clause = ""
+        if is_proc:
+            proc_clause = (
+                f"\n\n████ PROCESO DE NEGOCIO CRITICO FALLANDO ████\nEl proceso "
+                f"'{proc_name or 'critico'}' (endpoint {proc_endpoint or 'n/d'}) esta "
+                f"fallando con HTTP {proc_status or '4xx/5xx'}. Esto NO es un problema de "
+                f"infraestructura generico — es una OPERACION DE NEGOCIO CRITICA de TALENTO "
+                f"(el Cierre de Mes es SOX-relevante). Investiga la causa segun el codigo: "
+                f"si es 403/401 → es un problema de PERMISOS/ROL o autenticacion del "
+                f"servicio (usa lookup_runtime_logs, tlnt_explorer, lookup_app_insights, "
+                f"user_activity); si es 5xx → error de aplicacion o dependencia (usa "
+                f"lookup_sql, lookup_app_insights). En report_incident: categoria="
+                f"'aplicacion', modulo_talento acorde al proceso, requiere_remediacion=false "
+                f"(NO hay playbook de catalogo para arreglar permisos — se ESCALA al equipo "
+                f"de la aplicacion), confianza_pct alto si el patron es claro, y una "
+                f"recomendacion ESPECIFICA (ej. 'el servicio que ejecuta el Cierre de Mes "
+                f"no tiene el rol/permiso requerido; revisar la asignacion de permisos del "
+                f"endpoint {proc_endpoint or 'cierreMes'}'). En la causa_raiz deja claro que "
+                f"el CIERRE DE MES esta caido y el impacto de negocio."
+            )
+
         # Remediacion condicional segun severidad. Robusto a variantes en
         # espanol/mayusculas que mandan las reglas de Kibana (CRITICO, ALTA, etc.).
         # DDL/DAM habilitan remediacion sin importar severidad (seguridad/SOX).
@@ -391,7 +418,7 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"primer dato. Lleva registro mental de QUE fuentes consultaste.\n\n"
             f"PASO 3 — VEREDICTO: determina si la alerta corresponde a un "
             f"problema REAL o es un FALSO POSITIVO. Justifica con los datos.\n\n"
-            f"{remediation_clause}{bruteforce_clause}{ddl_clause}{dam_clause}\n\n"
+            f"{remediation_clause}{bruteforce_clause}{ddl_clause}{dam_clause}{proc_clause}\n\n"
             f"PASO FINAL OBLIGATORIO Y AUTOMATICO — report_incident: tu ULTIMA "
             f"accion en CADA alerta DEBE ser llamar a la tool report_incident. "
             f"NO es opcional, NO pidas confirmacion al usuario, NO preguntes "
