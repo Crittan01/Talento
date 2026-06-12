@@ -188,6 +188,28 @@ def lookup_changes(ci_id: str = "", estado: str = "aprobado",
     return _panel_query({"modo": "changes", "ci_id": ci_id, "estado": estado})
 
 
+def lookup_vuln(recurso: str = "", emit: Optional[Callable] = None) -> dict:
+    """Consulta el registro de postura/vulnerabilidades (azure-vuln-findings) que
+    pueblan los escaneos agendados (Defender + config real). Filtra por recurso si
+    se da. Devuelve hallazgos con severidad, titulo, recomendacion y fuente. USALA
+    para correlacionar un incidente con el estado de hardening del recurso afectado."""
+    p = {"modo": "vuln"}
+    if recurso:
+        p.update({"filtro": recurso, "campo": "recurso.keyword"})
+    return _panel_query(p)
+
+
+def lookup_assets(recurso: str = "", emit: Optional[Callable] = None) -> dict:
+    """Consulta el inventario/obsolescencia (azure-assets-cis) del discovery
+    agendado. Filtra por nombre de recurso si se da. Devuelve tipo, version/SKU,
+    criticidad y ciclo de vida (vigente/proximo/eol). USALA para saber si el
+    recurso afectado esta obsoleto o fuera de soporte."""
+    p = {"modo": "assets"}
+    if recurso:
+        p.update({"filtro": recurso, "campo": "nombre.keyword"})
+    return _panel_query(p)
+
+
 # ============================================================================
 # Credencial Azure: detecta si estamos en Function (usa User Assigned MI) o
 # en local (usa az login via DefaultAzureCredential).
@@ -2731,6 +2753,47 @@ TOOL_LOOKUP_CHANGES = FunctionTool(
     strict=True,
 )
 
+TOOL_LOOKUP_VULN = FunctionTool(
+    name="lookup_vuln",
+    description=(
+        "Consulta el registro de POSTURA/VULNERABILIDADES de TALENTO (poblado por "
+        "los escaneos agendados: Defender for Cloud + analisis de config real). "
+        "Filtra por nombre de recurso (vacio = todos). Devuelve hallazgos de "
+        "hardening con severidad, titulo, recomendacion y fuente (defender|config). "
+        "USALA para correlacionar un incidente con el estado de seguridad del "
+        "recurso afectado (p.ej. SQL expuesto a red publica, NSG abierto)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "recurso": {"type": "string", "description": "nombre del recurso a filtrar (vacio = todos)"},
+        },
+        "required": ["recurso"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_LOOKUP_ASSETS = FunctionTool(
+    name="lookup_assets",
+    description=(
+        "Consulta el INVENTARIO/OBSOLESCENCIA de TALENTO (poblado por el discovery "
+        "agendado via Azure Resource Graph). Filtra por nombre de recurso (vacio = "
+        "todos). Devuelve tipo, version/SKU, criticidad y ciclo de vida "
+        "(vigente|proximo|eol). USALA para saber si el recurso afectado por un "
+        "incidente esta obsoleto o fuera de soporte."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "recurso": {"type": "string", "description": "nombre del recurso a filtrar (vacio = todos)"},
+        },
+        "required": ["recurso"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 TOOL_DETECT_ANOMALIES = FunctionTool(
     name="detect_anomalies",
     description=(
@@ -2948,6 +3011,8 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_LOOKUP_CMDB,        # v24 ITSM: CMDB (CI afectado, owner_group, criticidad)
         TOOL_LOOKUP_KEDB,        # v24 ITSM: KEDB (error conocido, solucion, playbook)
         TOOL_LOOKUP_CHANGES,     # v24 ITSM: CHG aprobados (correlacion DDL no autorizado)
+        TOOL_LOOKUP_VULN,        # v25 postura: hallazgos vuln/config del recurso
+        TOOL_LOOKUP_ASSETS,      # v25 postura: inventario/obsolescencia del recurso
         TOOL_DETECT_ANOMALIES,   # v21: series_decompose_anomalies en 3 metricas
         TOOL_REPORT_INCIDENT,    # v22: reporta al Panel de Aprobacion AIOps (ELK)
         TOOL_QUERY_LA,
@@ -3498,6 +3563,22 @@ def process_response_items(
                 fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
                                    "output": _kql_result_to_payload(result)})
 
+            elif item.name == "lookup_vuln":
+                rec = (args.get("recurso", "") or "").strip()
+                print(f"     VULN recurso={rec or '(all)'}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_vuln", "args": {"recurso": rec}})
+                result = lookup_vuln(recurso=rec, emit=emit)
+                fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                                   "output": _kql_result_to_payload(result)})
+
+            elif item.name == "lookup_assets":
+                rec = (args.get("recurso", "") or "").strip()
+                print(f"     ASSETS recurso={rec or '(all)'}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_assets", "args": {"recurso": rec}})
+                result = lookup_assets(recurso=rec, emit=emit)
+                fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                                   "output": _kql_result_to_payload(result)})
+
             # ---- detect_anomalies (series_decompose_anomalies KQL) ----
             elif item.name == "detect_anomalies":
                 metric = (args.get("metric_type", "error_rate") or "error_rate").strip()
@@ -3772,6 +3853,7 @@ def run_cycle(
         "user_activity": "logs", "lookup_app_insights": "performance",
         "detect_anomalies": "anomalias", "lookup_elk": "red",
         "lookup_cmdb": "cmdb", "lookup_kedb": "kedb", "lookup_changes": "cambios",
+        "lookup_vuln": "postura", "lookup_assets": "inventario",
     }
 
     # Wrap del emit para detectar el reporte al panel y acumular correlacion.
