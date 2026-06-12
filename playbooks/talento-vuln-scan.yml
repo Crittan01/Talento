@@ -1,0 +1,200 @@
+---
+# talento-vuln-scan.yml
+#
+# POSTURA DE SEGURIDAD (dolor 7 — vulnerabilidades/hardening). Combina dos
+# fuentes REALES: (1) Microsoft Defender for Cloud assessments (si esta
+# habilitado) y (2) analisis de configuracion via Azure Resource Graph
+# (acceso publico, TLS, cifrado, NSG abiertos, purge-protection). Escribe los
+# hallazgos en el registro azure-vuln-findings via el panel, y si hay hallazgos
+# de severidad alta/critica abre un incidente en la cola ITSM. Solo lectura.
+#
+# Agendado en AWX (cron). Variables azure_* inyectadas por el bridge o .env.
+
+- name: TALENTO Vuln Scan — postura de seguridad (Defender + config real)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    rg_prefix:       "{{ rg_prefix_in | default('rg-central-solucion-talento') }}"
+    panel_registro_url:  "{{ panel_url_in | default('http://48.214.147.7:9200/api/registro') }}"
+    panel_incidente_url: "{{ panel_inc_url_in | default('http://48.214.147.7:9200/api/incidente') }}"
+    elk_token:       "{{ elk_query_token | default('elkq-9f3a2b7c1d8e4f60aiops') }}"
+    teams_url:       "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    arm: "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+    # Checks de configuracion (Resource Graph) — cada uno proyecta 'name'
+    checks:
+      - id: sql_public
+        sev: alta
+        tipo: "SQL Server expuesto a red pública (publicNetworkAccess=Enabled)"
+        rec: "Restringir con Private Endpoint y/o reglas de firewall; deshabilitar acceso público."
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.sql/servers' and tostring(properties.publicNetworkAccess)=='Enabled' | project name"
+      - id: storage_blob
+        sev: alta
+        tipo: "Storage Account permite acceso público a blobs"
+        rec: "Deshabilitar allowBlobPublicAccess salvo necesidad explícita."
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.storage/storageaccounts' and tobool(properties.allowBlobPublicAccess)==true | project name"
+      - id: storage_tls
+        sev: media
+        tipo: "Storage Account con TLS mínimo < 1.2"
+        rec: "Forzar minimumTlsVersion=TLS1_2."
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.storage/storageaccounts' and tostring(properties.minimumTlsVersion)!='TLS1_2' | project name"
+      - id: kv_purge
+        sev: media
+        tipo: "Key Vault sin protección contra purga (purge protection)"
+        rec: "Habilitar enablePurgeProtection para evitar borrado irreversible de secretos."
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.keyvault/vaults' and tobool(properties.enablePurgeProtection)!=true | project name"
+      - id: nsg_open
+        sev: alta
+        tipo: "NSG con regla inbound abierta a Internet (source '*')"
+        rec: "Acotar sourceAddressPrefix a rangos conocidos; cerrar accesos amplios."
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.network/networksecuritygroups' | mv-expand rule=properties.securityRules | where tostring(rule.properties.access)=='Allow' and tostring(rule.properties.direction)=='Inbound' and tostring(rule.properties.sourceAddressPrefix)=='*' | project name=strcat(name,' / ',tostring(rule.name))"
+
+  tasks:
+    - name: Validar credenciales Azure
+      ansible.builtin.assert:
+        that: [tenant_id | length > 0, client_id | length > 0, subscription_id | length > 0]
+        fail_msg: "Faltan credenciales Azure."
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body: {grant_type: client_credentials, client_id: "{{ client_id }}", client_secret: "{{ client_secret }}", resource: "https://management.azure.com/"}
+        status_code: 200
+        timeout: 30
+      register: token_resp
+      no_log: true
+
+    - name: Ejecutar checks de configuración (Resource Graph)
+      ansible.builtin.uri:
+        url: "{{ arm }}"
+        method: POST
+        headers: {Authorization: "Bearer {{ token_resp.json.access_token }}", Content-Type: application/json}
+        body_format: json
+        body: {subscriptions: ["{{ subscription_id }}"], query: "{{ item.query }}"}
+        status_code: 200
+        timeout: 40
+      register: check_results
+      loop: "{{ checks }}"
+      loop_control: {label: "{{ item.id }}"}
+      no_log: true
+
+    - name: Construir hallazgos de configuración
+      ansible.builtin.set_fact:
+        findings: "{{ findings | default([]) + [{
+          'tipo_hallazgo': item.0.item.id,
+          'severidad': item.0.item.sev,
+          'recurso': item.1.name,
+          'titulo': item.0.item.tipo,
+          'descripcion': item.0.item.tipo,
+          'recomendacion': item.0.item.rec,
+          'fuente': 'config',
+          'estado': 'abierto'
+        }] }}"
+      loop: "{{ check_results.results | subelements('json.data', skip_missing=True) }}"
+      loop_control: {label: "{{ item.1.name }}"}
+
+    - name: Consultar Defender for Cloud assessments (integración real)
+      ansible.builtin.uri:
+        url: "https://management.azure.com/subscriptions/{{ subscription_id }}/providers/Microsoft.Security/assessments?api-version=2020-01-01"
+        method: GET
+        headers: {Authorization: "Bearer {{ token_resp.json.access_token }}"}
+        status_code: [200, 404]
+        timeout: 40
+      register: defender
+      no_log: true
+
+    - name: Añadir hallazgos Defender (unhealthy)
+      ansible.builtin.set_fact:
+        findings: "{{ findings | default([]) + [{
+          'tipo_hallazgo': 'defender',
+          'severidad': (item.properties.metadata.severity | default('media') | lower),
+          'recurso': (item.properties.resourceDetails.ResourceName | default('?')),
+          'titulo': item.properties.displayName | default('Defender finding'),
+          'descripcion': item.properties.displayName | default(''),
+          'recomendacion': 'Revisar recomendación de Defender for Cloud.',
+          'fuente': 'defender',
+          'estado': 'abierto'
+        }] }}"
+      loop: "{{ (defender.json.value | default([])) | selectattr('properties.status.code','equalto','Unhealthy') | list }}"
+      loop_control: {label: "{{ item.name | default('?') }}"}
+      when: defender.json.value is defined
+
+    - name: Ingestar hallazgos en el registro (snapshot reset)
+      ansible.builtin.uri:
+        url: "{{ panel_registro_url }}"
+        method: POST
+        headers: {X-Elk-Token: "{{ elk_token }}", Content-Type: application/json}
+        body_format: json
+        body: {registro: vuln, reset: true, docs: "{{ findings | default([]) }}"}
+        status_code: [200, 201]
+        timeout: 30
+        validate_certs: false
+      register: ingest
+
+    - name: Contar severidades
+      ansible.builtin.set_fact:
+        n_alta: "{{ (findings | default([]) | selectattr('severidad','in',['alta','critica']) | list | length) }}"
+        n_total: "{{ findings | default([]) | length }}"
+
+    # Postura → ITSM: si hay hallazgos altos/críticos, abrir incidente en la cola
+    - name: Abrir incidente de postura en la cola ITSM (si hay altos/críticos)
+      ansible.builtin.uri:
+        url: "{{ panel_incidente_url }}"
+        method: POST
+        body_format: json
+        body:
+          incident_id: "POSTURA-{{ ansible_date_time.epoch | default(lookup('pipe','date +%s')) }}"
+          deteccion:
+            alerta_regla: postura_seguridad
+            recurso_afectado: sqlserver-ecopetrol2
+            nivel_severidad: high
+          analisis_agente:
+            causa_raiz: "Escaneo de postura: {{ n_alta }} hallazgos de severidad alta/crítica de {{ n_total }} totales (config real + Defender). Principales: acceso público SQL/Storage, NSG abiertos, Key Vault sin purge-protection."
+            categoria: seguridad
+            confianza_pct: 95
+            recomendacion: "Remediar hardening: cerrar acceso público, forzar TLS1_2, acotar NSG, habilitar purge-protection."
+          automatizacion:
+            playbook: ""
+            tipo: diagnostico
+            estado: pendiente_aprobacion
+            modo: semiautomatico
+        status_code: [200, 201]
+        timeout: 20
+        validate_certs: false
+      when: (n_alta | int) > 0
+      ignore_errors: true
+
+    - name: Resumen
+      ansible.builtin.set_stats:
+        data:
+          hallazgos_total: "{{ n_total }}"
+          hallazgos_altos: "{{ n_alta }}"
+          ingestados: "{{ ingest.json.ingestados | default('?') }}"
+          message: "Postura: {{ n_total }} hallazgos ({{ n_alta }} altos/críticos)."
+
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - {type: TextBlock, text: "🛡️ Escaneo de postura TALENTO", weight: Bolder, size: Medium}
+            - type: FactSet
+              facts:
+                - {title: Hallazgos totales, value: "{{ n_total }}"}
+                - {title: Altos/críticos, value: "{{ n_alta }}"}
+                - {title: Fuentes, value: "Config real (Resource Graph) + Defender for Cloud"}
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true

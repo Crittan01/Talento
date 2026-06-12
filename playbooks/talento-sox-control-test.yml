@@ -1,0 +1,131 @@
+---
+# talento-sox-control-test.yml
+#
+# CONTROLES SOX (dolor 9 — cumplimiento/continuidad). Ejecuta chequeos REALES de
+# control sobre los recursos de TALENTO via Azure Resource Graph y registra la
+# evidencia (cumple/no_cumple) en azure-sox-controls via el panel. Es el insumo
+# para evidencia de auditoría. Solo lectura; pensado para correr AGENDADO (cron).
+#
+# Variables azure_* inyectadas por el bridge o desde .env.
+
+- name: TALENTO SOX Control Test — evidencia de controles (chequeos ARM reales)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    rg_prefix:       "{{ rg_prefix_in | default('rg-central-solucion-talento') }}"
+    panel_registro_url: "{{ panel_url_in | default('http://48.214.147.7:9200/api/registro') }}"
+    elk_token:       "{{ elk_query_token | default('elkq-9f3a2b7c1d8e4f60aiops') }}"
+    teams_url:       "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    arm: "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+    # Cada control proyecta recurso + resultado (cumple|no_cumple)
+    controls:
+      - id: SOX-01
+        nombre: "Cifrado en tránsito SQL (TLS >= 1.2)"
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.sql/servers' | project recurso=name, resultado=iff(tostring(properties.minimalTlsVersion)=='1.2','cumple','no_cumple')"
+      - id: SOX-02
+        nombre: "Acceso a BD restringido (sin red pública)"
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.sql/servers' | project recurso=name, resultado=iff(tostring(properties.publicNetworkAccess)=='Disabled','cumple','no_cumple')"
+      - id: SOX-03
+        nombre: "Cifrado en tránsito Storage (HTTPS obligatorio)"
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.storage/storageaccounts' | project recurso=name, resultado=iff(tobool(properties.supportsHttpsTrafficOnly)==true,'cumple','no_cumple')"
+      - id: SOX-04
+        nombre: "Protección de secretos (Key Vault soft-delete)"
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.keyvault/vaults' | project recurso=name, resultado=iff(tobool(properties.enableSoftDelete)==true,'cumple','no_cumple')"
+      - id: SOX-05
+        nombre: "Segmentación de red (NSG sin inbound abierto a Internet)"
+        query: "resources | where resourceGroup startswith '{{ rg_prefix }}' and type=='microsoft.network/networksecuritygroups' | mv-expand rule=properties.securityRules | summarize abiertas=countif(tostring(rule.properties.access)=='Allow' and tostring(rule.properties.direction)=='Inbound' and tostring(rule.properties.sourceAddressPrefix)=='*') by recurso=name | project recurso, resultado=iff(abiertas>0,'no_cumple','cumple')"
+
+  tasks:
+    - name: Validar credenciales Azure
+      ansible.builtin.assert:
+        that: [tenant_id | length > 0, client_id | length > 0, subscription_id | length > 0]
+        fail_msg: "Faltan credenciales Azure."
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body: {grant_type: client_credentials, client_id: "{{ client_id }}", client_secret: "{{ client_secret }}", resource: "https://management.azure.com/"}
+        status_code: 200
+        timeout: 30
+      register: token_resp
+      no_log: true
+
+    - name: Ejecutar controles (Resource Graph)
+      ansible.builtin.uri:
+        url: "{{ arm }}"
+        method: POST
+        headers: {Authorization: "Bearer {{ token_resp.json.access_token }}", Content-Type: application/json}
+        body_format: json
+        body: {subscriptions: ["{{ subscription_id }}"], query: "{{ item.query }}"}
+        status_code: 200
+        timeout: 40
+      register: control_results
+      loop: "{{ controls }}"
+      loop_control: {label: "{{ item.id }}"}
+      no_log: true
+
+    - name: Construir evidencia de controles
+      ansible.builtin.set_fact:
+        controles: "{{ controles | default([]) + [{
+          'control_id': item.0.item.id,
+          'control_nombre': item.0.item.nombre,
+          'recurso': item.1.recurso,
+          'resultado': item.1.resultado,
+          'evidencia': 'Azure Resource Graph (lectura directa de configuración)',
+          'marco': 'SOX'
+        }] }}"
+      loop: "{{ control_results.results | subelements('json.data', skip_missing=True) }}"
+      loop_control: {label: "{{ item.0.item.id }}:{{ item.1.recurso }}" }
+
+    - name: Ingestar controles en el registro (snapshot reset)
+      ansible.builtin.uri:
+        url: "{{ panel_registro_url }}"
+        method: POST
+        headers: {X-Elk-Token: "{{ elk_token }}", Content-Type: application/json}
+        body_format: json
+        body: {registro: sox, reset: true, docs: "{{ controles | default([]) }}"}
+        status_code: [200, 201]
+        timeout: 30
+        validate_certs: false
+      register: ingest
+
+    - name: Resumen
+      ansible.builtin.set_fact:
+        n_cumple: "{{ controles | default([]) | selectattr('resultado','equalto','cumple') | list | length }}"
+        n_no: "{{ controles | default([]) | selectattr('resultado','equalto','no_cumple') | list | length }}"
+
+    - name: set_stats
+      ansible.builtin.set_stats:
+        data:
+          controles_total: "{{ controles | default([]) | length }}"
+          cumplen: "{{ n_cumple }}"
+          no_cumplen: "{{ n_no }}"
+          message: "Controles SOX: {{ n_cumple }} cumplen, {{ n_no }} no cumplen de {{ controles | default([]) | length }}."
+
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - {type: TextBlock, text: "📑 Controles SOX TALENTO — evidencia actualizada", weight: Bolder, size: Medium}
+            - type: FactSet
+              facts:
+                - {title: Controles evaluados, value: "{{ controles | default([]) | length }}"}
+                - {title: Cumplen, value: "{{ n_cumple }}"}
+                - {title: No cumplen, value: "{{ n_no }}"}
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true

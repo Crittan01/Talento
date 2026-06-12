@@ -1,0 +1,156 @@
+---
+# talento-discovery-inventory.yml
+#
+# DESCUBRIMIENTO (dolor 8 — obsolescencia). Consulta Azure Resource Graph para
+# inventariar TODOS los recursos de TALENTO con su tipo/SKU/version y evalua su
+# ciclo de vida (vigente/proximo/eol). Escribe el snapshot en el registro
+# azure-assets-cis via el panel (/api/registro). Pensado para correr AGENDADO
+# en AWX (cron). NO es invasivo: solo lectura.
+#
+# Variables (azure_* inyectadas por el bridge o desde .env):
+#   azure_tenant_id / azure_client_id / azure_client_secret / azure_subscription_id
+#   rg_prefix         prefijo de RG a inventariar (default rg-central-solucion-talento)
+#   panel_registro_url / elk_query_token   destino de ingesta
+
+- name: TALENTO Discovery Inventory — inventario + obsolescencia (Resource Graph)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
+    rg_prefix:       "{{ rg_prefix_in | default('rg-central-solucion-talento') }}"
+    panel_registro_url: "{{ panel_url_in | default('http://48.214.147.7:9200/api/registro') }}"
+    elk_token:       "{{ elk_query_token | default('elkq-9f3a2b7c1d8e4f60aiops') }}"
+    teams_url:       "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    # Criticidad por tipo (los core de TALENTO son altos)
+    crit_map:
+      servers: critica
+      databases: critica
+      containergroups: alta
+      sites: alta
+      networksecuritygroups: alta
+      virtualmachines: alta
+    # Runtimes/SKU fuera de soporte (heuristica real, ampliable)
+    eol_patterns: "python|3.6|python|3.7|node|12|node|14|dotnet|3.1|php|7."
+
+  tasks:
+    - name: Validar credenciales Azure
+      ansible.builtin.assert:
+        that:
+          - tenant_id | length > 0
+          - client_id | length > 0
+          - subscription_id | length > 0
+        fail_msg: "Faltan credenciales Azure (tenant/client/subscription)."
+
+    - name: Obtener token ARM
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ tenant_id }}/oauth2/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ client_id }}"
+          client_secret: "{{ client_secret }}"
+          resource: "https://management.azure.com/"
+        status_code: 200
+        timeout: 30
+      register: token_resp
+      no_log: true
+
+    - name: Consultar Resource Graph (inventario de TALENTO)
+      ansible.builtin.uri:
+        url: "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ token_resp.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          subscriptions: ["{{ subscription_id }}"]
+          query: >-
+            Resources
+            | where resourceGroup startswith '{{ rg_prefix }}'
+            | project nombre=name, tipo=type, ubicacion=location,
+              sku=tostring(sku.name), clase=tostring(kind),
+              runtime=tostring(properties.siteConfig.linuxFxVersion),
+              sqlver=tostring(properties.version)
+            | order by tipo asc
+        status_code: 200
+        timeout: 40
+      register: rg
+      no_log: true
+
+    - name: Construir documentos de activos (con evaluacion de ciclo de vida)
+      ansible.builtin.set_fact:
+        assets: >-
+          {{ assets | default([]) + [{
+            'nombre': item.nombre,
+            'tipo': item.tipo,
+            'tipo_corto': item.tipo | regex_replace('^.*/', ''),
+            'ubicacion': item.ubicacion,
+            'sku': item.sku | default(''),
+            'kind': item.clase | default(''),
+            'version': (item.runtime if (item.runtime | default('') | length > 0) else (('SQL ' ~ item.sqlver) if (item.sqlver | default('') | length > 0) else (item.sku | default('')))),
+            'criticidad': crit_map[item.tipo | regex_replace('^.*/', '')] | default('media'),
+            'eol_estado': ('eol' if (item.runtime | default('') | lower is search(eol_patterns)) else 'vigente'),
+            'eol_nota': ('runtime fuera de soporte' if (item.runtime | default('') | lower is search(eol_patterns)) else ''),
+            'fuente': 'resource-graph'
+          }] }}
+      loop: "{{ rg.json.data }}"
+      loop_control:
+        label: "{{ item.nombre }}"
+
+    - name: Ingestar inventario en el registro (snapshot reset)
+      ansible.builtin.uri:
+        url: "{{ panel_registro_url }}"
+        method: POST
+        headers:
+          X-Elk-Token: "{{ elk_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          registro: assets
+          reset: true
+          docs: "{{ assets }}"
+        status_code: [200, 201]
+        timeout: 30
+        validate_certs: false
+      register: ingest
+
+    - name: Resumen
+      ansible.builtin.set_stats:
+        data:
+          activos_inventariados: "{{ assets | length }}"
+          eol_detectados: "{{ assets | selectattr('eol_estado', 'equalto', 'eol') | list | length }}"
+          ingestados: "{{ ingest.json.ingestados | default('?') }}"
+          message: "Inventario: {{ assets | length }} recursos, {{ assets | selectattr('eol_estado','equalto','eol') | list | length }} fuera de soporte."
+
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - type: TextBlock
+              text: "📋 Discovery TALENTO — inventario actualizado"
+              weight: Bolder
+              size: Medium
+            - type: FactSet
+              facts:
+                - title: Recursos inventariados
+                  value: "{{ assets | length }}"
+                - title: Fuera de soporte (EOL)
+                  value: "{{ assets | selectattr('eol_estado','equalto','eol') | list | length }}"
+                - title: Fuente
+                  value: "Azure Resource Graph (lectura)"
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true
