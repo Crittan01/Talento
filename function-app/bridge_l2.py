@@ -1354,6 +1354,8 @@ _METRIC_CATEGORIA = {
     "error_rate": "aplicacion", "error_spike": "aplicacion", "tlnt_errors": "aplicacion",
     "auth_failures": "seguridad", "brute_force": "seguridad", "failed_login": "seguridad",
     "sql_dtu": "base_datos", "sql_connections": "base_datos", "database": "base_datos", "deadlock": "base_datos",
+    "ddl": "base_datos", "ddl_no_autorizado": "base_datos",
+    "acceso_db": "seguridad", "acceso_db_anomalo": "seguridad", "dam": "seguridad",
     "latency_p95": "aplicacion", "latency": "aplicacion", "http_5xx": "aplicacion",
     "throughput": "aplicacion", "slow_dependency": "aplicacion",
     "container_restart": "infraestructura", "container_state": "infraestructura",
