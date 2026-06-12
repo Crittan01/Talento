@@ -1,0 +1,144 @@
+---
+# talento-sql-disable-login.yml
+#
+# REMEDIACION (dolor 6 — accesos indebidos a BD / DAM). Deshabilita el acceso de
+# un login/usuario sospechoso a la base de TALENTO como CONTENCION semiautomatica.
+# Es ANALOGO al bloqueo de IP (talento-nsg-block-ip) pero a nivel de identidad de
+# base de datos: cuando el vector no es la red sino una credencial comprometida.
+#
+# DRY-RUN (default): muestra el T-SQL que SE EJECUTARIA, sin tocar la BD.
+# REAL (dry_run=false): ejecuta el DENY/DISABLE — REQUIERE credencial SQL dedicada
+#   (sql_admin_login/sql_admin_password) y conectividad del runner a Azure SQL.
+#   Si no hay credencial, NO ejecuta aunque dry_run=false (seguro por defecto).
+#
+# Variables (inyectadas por el bridge/panel desde el incidente):
+#   target_login        login/usuario a contener            (OBLIGATORIA)
+#   sql_server_name     SQL Server      (ej. sqlserver-ecopetrol2)
+#   sql_db_name         database        (ej. ecopetroldb2)
+#   source_ip           IP origen del acceso (contexto, opcional)
+#   sql_admin_login     credencial SQL dedicada (solo REAL)
+#   sql_admin_password  credencial SQL dedicada (solo REAL)
+#   dry_run             true (default)
+
+- name: TALENTO SQL Disable Login — contencion de acceso indebido a BD
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    sql_server:   "{{ sql_server_name | default('sqlserver-ecopetrol2') }}"
+    sql_db:       "{{ sql_db_name     | default('ecopetroldb2') }}"
+    tgt_login:    "{{ target_login | default('') }}"
+    src_ip:       "{{ source_ip | default('') }}"
+    sa_login:     "{{ sql_admin_login    | default(lookup('env', 'SQL_ADMIN_LOGIN')) }}"
+    sa_password:  "{{ sql_admin_password | default(lookup('env', 'SQL_ADMIN_PASSWORD')) }}"
+    is_dry_run:   "{{ dry_run | default(true) | bool }}"
+    teams_url:    "{{ teams_webhook_url | default(lookup('env', 'TEAMS_WEBHOOK_URL')) }}"
+    sql_fqdn:     "{{ sql_server }}.database.windows.net"
+    # Contencion reversible: niega CONNECT al principal en la base.
+    tsql:         "DENY CONNECT TO [{{ tgt_login }}];"
+    has_sql_cred: "{{ (sa_login | length > 0) and (sa_password | length > 0) }}"
+
+  tasks:
+    - name: Validar variable obligatoria target_login
+      ansible.builtin.assert:
+        that:
+          - tgt_login | length > 0
+        fail_msg: "Falta 'target_login' (login/usuario a contener). El bridge lo inyecta desde el incidente."
+
+    # ──────────────────────────────────────────────────────────────────────
+    # DRY-RUN: mostrar el T-SQL que SE EJECUTARIA
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[DRY-RUN] Mostrar accion de contencion planificada"
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════════"
+          - "  🔍 DRY-RUN — NO se modifica la base de datos"
+          - "════════════════════════════════════════════════════════"
+          - "  SQL Server:  {{ sql_fqdn }}"
+          - "  Database:    {{ sql_db }}"
+          - "  Login a contener: {{ tgt_login }}"
+          - "  Origen detectado: {{ src_ip | default('n/a') }}"
+          - ""
+          - "  T-SQL PLANIFICADO: {{ tsql }}"
+          - "  (reversible con: GRANT CONNECT TO [{{ tgt_login }}];)"
+          - ""
+          - "  Para ejecutar de verdad: dry_run=false + credencial SQL dedicada."
+      when: is_dry_run
+
+    - name: "[DRY-RUN] Publicar set_stats"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: false
+          dry_run: true
+          sql_server: "{{ sql_server }}"
+          database: "{{ sql_db }}"
+          target_login: "{{ tgt_login }}"
+          tsql_planned: "{{ tsql }}"
+          message: "DRY-RUN: se contendria el login {{ tgt_login }} en {{ sql_db }} (DENY CONNECT)."
+      when: is_dry_run
+
+    # ──────────────────────────────────────────────────────────────────────
+    # REAL: ejecutar el DENY CONNECT (requiere credencial SQL dedicada)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: "[REAL] Aviso — falta credencial SQL dedicada (no se ejecuta)"
+      ansible.builtin.debug:
+        msg: "dry_run=false pero NO hay sql_admin_login/password. Por seguridad NO se ejecuta. Provea la credencial SQL dedicada en AWX."
+      when: not is_dry_run and not (has_sql_cred | bool)
+
+    - name: "[REAL] Aplicar DENY CONNECT via sqlcmd"
+      ansible.builtin.shell: >-
+        sqlcmd -S {{ sql_fqdn }} -d {{ sql_db }}
+        -U {{ sa_login }} -P {{ sa_password }}
+        -l 30 -b -Q "{{ tsql }}"
+      register: sql_result
+      no_log: true
+      when: not is_dry_run and (has_sql_cred | bool)
+
+    - name: "[REAL] Publicar set_stats"
+      ansible.builtin.set_stats:
+        data:
+          action_executed: true
+          dry_run: false
+          sql_server: "{{ sql_server }}"
+          database: "{{ sql_db }}"
+          target_login: "{{ tgt_login }}"
+          tsql_executed: "{{ tsql }}"
+          rc: "{{ sql_result.rc | default('?') }}"
+          message: "REAL: contenido el login {{ tgt_login }} en {{ sql_db }} (DENY CONNECT)."
+      when: not is_dry_run and (has_sql_cred | bool)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Teams notification (siempre)
+    # ──────────────────────────────────────────────────────────────────────
+    - name: Notificar Teams
+      ansible.builtin.uri:
+        url: "{{ teams_url }}"
+        method: POST
+        body_format: json
+        body:
+          type: AdaptiveCard
+          version: "1.4"
+          body:
+            - type: TextBlock
+              text: >-
+                {{ '🔍 DRY-RUN' if is_dry_run else '✅ EJECUTADO' }}
+                — Contencion de acceso a BD {{ 'planificada' if is_dry_run else 'aplicada' }}
+              weight: Bolder
+              size: Medium
+            - type: FactSet
+              facts:
+                - title: Login contenido
+                  value: "{{ tgt_login }}"
+                - title: Database
+                  value: "{{ sql_db }}"
+                - title: Origen
+                  value: "{{ src_ip | default('n/a') }}"
+                - title: Accion
+                  value: "DENY CONNECT (reversible)"
+                - title: Modo
+                  value: "{{ 'DRY-RUN (no modificado)' if is_dry_run else 'REAL' }}"
+        status_code: [200, 202]
+        timeout: 15
+        validate_certs: false
+      when: teams_url | length > 0
+      ignore_errors: true
