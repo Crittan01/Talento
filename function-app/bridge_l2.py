@@ -147,6 +147,47 @@ def lookup_elk(modo: str = "brute_force", ip: str = "", window_min: int = 60,
         return {"error": f"proxy ELK inalcanzable: {exc}", "modo": modo}
 
 
+def _panel_query(payload: dict) -> dict:
+    """POST generico al proxy read-only del panel (mismo endpoint/token que
+    lookup_elk). Lo usan las tools ITSM (cmdb/kedb/changes)."""
+    try:
+        resp = requests.post(
+            ELK_QUERY_URL, json=payload,
+            headers={"X-Elk-Token": ELK_QUERY_TOKEN, "Content-Type": "application/json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return {"error": f"proxy ELK HTTP {resp.status_code}", "modo": payload.get("modo")}
+        return resp.json()
+    except Exception as exc:
+        return {"error": f"proxy ELK inalcanzable: {exc}", "modo": payload.get("modo")}
+
+
+def lookup_cmdb(ref: str = "", emit: Optional[Callable] = None) -> dict:
+    """Consulta la CMDB (azure-cmdb-cis): dado un alias/modulo/recurso/ci_id
+    devuelve el CI afectado (ci_id, nombre, tipo, owner_group, criticidad,
+    dependencias, playbooks). Sin ref lista todos los CIs. Da la vista unica de
+    servicio y el grupo dueno para enrutar el ticket."""
+    return _panel_query({"modo": "cmdb", "ref": ref})
+
+
+def lookup_kedb(error_code: str = "", regla: str = "", categoria: str = "",
+                emit: Optional[Callable] = None) -> dict:
+    """Consulta la KEDB (errores conocidos): por error_code TLNT, por regla de
+    alerta o por categoria. Devuelve causa conocida, solucion documentada,
+    playbook sugerido y articulo KB. Acelera el triage cuando el error ya es
+    conocido (compensa la curva de N2)."""
+    return _panel_query({"modo": "kedb", "error_code": error_code, "regla": regla, "categoria": categoria})
+
+
+def lookup_changes(ci_id: str = "", estado: str = "aprobado",
+                   emit: Optional[Callable] = None) -> dict:
+    """Consulta el registro de cambios CHG por CI. Sirve para decidir si un
+    evento (p.ej. un DDL en la BD) cae dentro de una ventana de cambio APROBADA
+    o es NO AUTORIZADO. Devuelve chg_id, ventana_inicio/fin, objeto_patron, estado."""
+    return _panel_query({"modo": "changes", "ci_id": ci_id, "estado": estado})
+
+
 # ============================================================================
 # Credencial Azure: detecta si estamos en Function (usa User Assigned MI) o
 # en local (usa az login via DefaultAzureCredential).
@@ -189,6 +230,9 @@ JT_IDS = {
     # Remediaciones de configuracion (dry_run=true por defecto)
     "jt_sql_diagnostics_enable":  int(ENV.get("AWX_JT_SQL_DIAGNOSTICS_ENABLE", 61)),
     "jt_nsg_block_ip":            int(ENV.get("AWX_JT_NSG_BLOCK_IP", 62)),
+    # Capa ITSM (dolores 5/6): contencion DDL no autorizado / acceso indebido a BD
+    "jt_sql_revoke_ddl":          int(ENV.get("AWX_JT_SQL_REVOKE_DDL", 46)),
+    "jt_sql_disable_login":       int(ENV.get("AWX_JT_SQL_DISABLE_LOGIN", 47)),
 }
 TEMPLATES_NEEDING_AZURE_CREDS = set(JT_IDS.values())
 
@@ -1412,6 +1456,11 @@ def build_incident_payload(
     # brute force) y se propaga a automatizacion.extra_vars para que el panel lo
     # reenvie a AWX sin que el operador tenga que escribirlo.
     src_ip = str(ctx.get("source_ip", "") or "").strip()
+    # Contexto para DDL/DAM (dolores 5/6): el login responsable y el objeto DDL
+    # viajan en el contexto de la alerta y se propagan como extra_vars a los
+    # playbooks talento-sql-revoke-ddl / talento-sql-disable-login.
+    tgt_login = str(ctx.get("usuario", "") or ctx.get("user", "") or "").strip()
+    ddl_object = str(ctx.get("objeto", "") or ctx.get("object", "") or "").strip()
 
     # automatizacion: si hay playbook propuesto → remediacion pendiente_aprobacion;
     # si no → solo diagnostico (informe, sin accion).
@@ -1428,8 +1477,15 @@ def build_incident_payload(
             "operador_aprobador": "L1",
             "sla_aprobacion_min": 15,
         }
+        _ev = {}
         if src_ip:
-            automatizacion["extra_vars"] = {"source_ip": src_ip}
+            _ev["source_ip"] = src_ip
+        if tgt_login:
+            _ev["target_login"] = tgt_login
+        if ddl_object:
+            _ev["ddl_object"] = ddl_object
+        if _ev:
+            automatizacion["extra_vars"] = _ev
         resolucion = "pendiente_aprobacion"
     else:
         automatizacion = {
@@ -1509,6 +1565,8 @@ _PLAYBOOK_TO_JT_KEY = {
     "talento-appservice-restart":     "jt_appservice_restart",
     "talento-sql-diagnostics-enable": "jt_sql_diagnostics_enable",
     "talento-nsg-block-ip":           "jt_nsg_block_ip",
+    "talento-sql-revoke-ddl":         "jt_sql_revoke_ddl",
+    "talento-sql-disable-login":      "jt_sql_disable_login",
 }
 
 
@@ -2605,6 +2663,72 @@ TOOL_LOOKUP_ELK = FunctionTool(
     strict=True,
 )
 
+TOOL_LOOKUP_CMDB = FunctionTool(
+    name="lookup_cmdb",
+    description=(
+        "Consulta la CMDB de TALENTO (catalogo de CIs/servicios). Dado un alias, "
+        "modulo (login.autenticacion...), nombre de recurso (aci-centralecopetrol2, "
+        "sqlserver-ecopetrol2...) o ci_id, devuelve el CI afectado con su tipo, "
+        "owner_group (grupo dueno para enrutar), criticidad, dependencias y "
+        "playbooks aplicables. USALA para identificar el servicio impactado y a "
+        "quien escalar. Con ref vacio lista todos los CIs."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "alias/modulo/nombre de recurso/ci_id (vacio = listar todos)"},
+        },
+        "required": ["ref"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_LOOKUP_KEDB = FunctionTool(
+    name="lookup_kedb",
+    description=(
+        "Consulta la KEDB (base de errores conocidos) de TALENTO. Busca por "
+        "error_code (TLNT-002, TLNT-011...), por regla de alerta (brute_force, "
+        "container_memoria, sql_deadlock...) o por categoria. Devuelve la causa "
+        "conocida, la solucion documentada, el playbook sugerido y el articulo KB. "
+        "USALA SIEMPRE al inicio del triage: si el error ya es conocido, aplica la "
+        "solucion documentada en vez de re-investigar desde cero."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "error_code": {"type": "string", "description": "codigo TLNT (vacio si no aplica)"},
+            "regla": {"type": "string", "description": "regla de alerta (vacio si no aplica)"},
+            "categoria": {"type": "string", "description": "seguridad|infraestructura|base_datos|aplicacion|red (vacio si no aplica)"},
+        },
+        "required": ["error_code", "regla", "categoria"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+TOOL_LOOKUP_CHANGES = FunctionTool(
+    name="lookup_changes",
+    description=(
+        "Consulta el registro de cambios (CHG) aprobados de un CI. CRITICO para "
+        "DDL no autorizado: dado un evento DDL en la base (CREATE/ALTER/DROP), "
+        "consulta si existe una ventana de cambio APROBADA que lo cubra (por CI y "
+        "objeto_patron/ventana). Si NO hay CHG que lo cubra → el cambio es NO "
+        "AUTORIZADO y debe escalarse/remediarse. Devuelve chg_id, ventana_inicio/fin, "
+        "objeto_patron y estado."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "ci_id": {"type": "string", "description": "CI afectado (p.ej. CI-SQL-V2)"},
+            "estado": {"type": "string", "description": "estado del cambio (default 'aprobado')"},
+        },
+        "required": ["ci_id", "estado"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 TOOL_DETECT_ANOMALIES = FunctionTool(
     name="detect_anomalies",
     description=(
@@ -2819,6 +2943,9 @@ def setup_agent_version(project: AIProjectClient):
         TOOL_LOOKUP_INFRA,       # v21: ARM directo (ACI/AppService/Storage/Network/Quotas)
         TOOL_LOOKUP_SQL,         # v21: SQL Servers + databases + diagnostics KQL
         TOOL_LOOKUP_ELK,         # v23: correlacion de red via proxy ELK (azure-eventhub)
+        TOOL_LOOKUP_CMDB,        # v24 ITSM: CMDB (CI afectado, owner_group, criticidad)
+        TOOL_LOOKUP_KEDB,        # v24 ITSM: KEDB (error conocido, solucion, playbook)
+        TOOL_LOOKUP_CHANGES,     # v24 ITSM: CHG aprobados (correlacion DDL no autorizado)
         TOOL_DETECT_ANOMALIES,   # v21: series_decompose_anomalies en 3 metricas
         TOOL_REPORT_INCIDENT,    # v22: reporta al Panel de Aprobacion AIOps (ELK)
         TOOL_QUERY_LA,
@@ -3339,6 +3466,36 @@ def process_response_items(
                     "output": _kql_result_to_payload(result),
                 })
 
+            # ---- lookup_cmdb / lookup_kedb / lookup_changes (capa ITSM) ----
+            elif item.name == "lookup_cmdb":
+                ref = (args.get("ref", "") or "").strip()
+                print(f"     CMDB ref={ref or '(all)'}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_cmdb", "args": {"ref": ref}})
+                result = lookup_cmdb(ref=ref, emit=emit)
+                fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                                   "output": _kql_result_to_payload(result)})
+
+            elif item.name == "lookup_kedb":
+                ec = (args.get("error_code", "") or "").strip()
+                rg = (args.get("regla", "") or "").strip()
+                cat = (args.get("categoria", "") or "").strip()
+                print(f"     KEDB ec={ec or '-'} regla={rg or '-'} cat={cat or '-'}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_kedb",
+                             "args": {"error_code": ec, "regla": rg, "categoria": cat}})
+                result = lookup_kedb(error_code=ec, regla=rg, categoria=cat, emit=emit)
+                fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                                   "output": _kql_result_to_payload(result)})
+
+            elif item.name == "lookup_changes":
+                ci = (args.get("ci_id", "") or "").strip()
+                est = (args.get("estado", "aprobado") or "aprobado").strip()
+                print(f"     CHG ci={ci or '-'} estado={est}")
+                _emit(emit, {"type": "tool.call", "hop": hop, "tool": "lookup_changes",
+                             "args": {"ci_id": ci, "estado": est}})
+                result = lookup_changes(ci_id=ci, estado=est, emit=emit)
+                fn_outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                                   "output": _kql_result_to_payload(result)})
+
             # ---- detect_anomalies (series_decompose_anomalies KQL) ----
             elif item.name == "detect_anomalies":
                 metric = (args.get("metric_type", "error_rate") or "error_rate").strip()
@@ -3612,6 +3769,7 @@ def run_cycle(
         "tlnt_explorer": "logs", "query_log_analytics": "logs",
         "user_activity": "logs", "lookup_app_insights": "performance",
         "detect_anomalies": "anomalias", "lookup_elk": "red",
+        "lookup_cmdb": "cmdb", "lookup_kedb": "kedb", "lookup_changes": "cambios",
     }
 
     # Wrap del emit para detectar el reporte al panel y acumular correlacion.

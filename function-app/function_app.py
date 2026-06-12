@@ -282,9 +282,56 @@ def normalize_payload(body: dict) -> Optional[str]:
                 f"causa_raiz y la recomendacion (ej. 'IP de Cartagena, Colombia')."
             )
 
+        # DDL no autorizado (dolor 5): correlacionar contra el registro de cambios
+        # CHG. Si no hay ventana aprobada que cubra el objeto → cambio NO AUTORIZADO.
+        _ml = str(metric).lower()
+        ddl_obj = str(ctx.get("objeto", "") or ctx.get("object", "")).strip()
+        ddl_user = str(ctx.get("usuario", "") or ctx.get("user", "")).strip()
+        ddl_cmd = str(ctx.get("comando", "") or ctx.get("command", "")).strip()
+        is_ddl = "ddl" in _ml
+        ddl_clause = ""
+        if is_ddl:
+            ddl_clause = (
+                f"\n\nNOTA CRITICA — DDL EN BASE DE DATOS DETECTADO (control SOX): se "
+                f"ejecuto un comando DDL ({ddl_cmd or 'CREATE/ALTER/DROP'}) sobre el "
+                f"objeto '{ddl_obj}' por el usuario '{ddl_user}' en la BD de TALENTO. "
+                f"DEBES determinar si es AUTORIZADO: (1) llama "
+                f"lookup_changes(ci_id='CI-SQL-V2', estado='aprobado') para ver las "
+                f"ventanas de cambio CHG aprobadas; (2) verifica si el objeto coincide "
+                f"con algun objeto_patron de una CHG cuya ventana (ventana_inicio.."
+                f"ventana_fin) cubra el momento del evento. Si NO hay CHG que lo cubra "
+                f"→ CAMBIO NO AUTORIZADO: en report_incident usa categoria='base_datos', "
+                f"requiere_remediacion=true, playbook='talento-sql-revoke-ddl', y explica "
+                f"en causa_raiz que el objeto se creo/modifico fuera de toda ventana de "
+                f"cambio aprobada. Si SI hay CHG que lo cubra → requiere_remediacion=false "
+                f"e informa que el cambio esta AUTORIZADO (cita la CHG correlacionada)."
+            )
+
+        # Acceso anomalo a BD / DAM (dolor 6): analogo al brute force aplicado a la BD.
+        dam_user = str(ctx.get("usuario", "") or ctx.get("user", "")).strip()
+        dam_ip = str(ctx.get("source_ip", "") or "").strip()
+        is_dam = "acceso_db" in _ml or "dam" in _ml
+        dam_clause = ""
+        if is_dam:
+            dam_clause = (
+                f"\n\nNOTA CRITICA — ACCESO ANOMALO A BASE DE DATOS: acceso sospechoso "
+                f"a la BD de TALENTO (usuario '{dam_user or 'desconocido'}', origen "
+                f"'{dam_ip or 'desconocido'}'). Correlaciona: (1) "
+                f"lookup_elk(modo='ip_detail', ip='{dam_ip}', window_min=43200) para "
+                f"geolocalizar el origen; (2) user_activity para el patron del usuario; "
+                f"(3) lookup_cmdb(ref='sqlserver-ecopetrol2') para el CI/owner. Si "
+                f"confirmas acceso indebido (fuera de horario, origen no autorizado, "
+                f"comando privilegiado) en report_incident usa categoria='seguridad', "
+                f"requiere_remediacion=true y propon el playbook adecuado: "
+                f"'talento-nsg-block-ip' si el vector es una IP de red, o "
+                f"'talento-sql-disable-login' si hay que deshabilitar el login de BD. "
+                f"Incluye geo y patron en la causa_raiz."
+            )
+
         # Remediacion condicional segun severidad. Robusto a variantes en
         # espanol/mayusculas que mandan las reglas de Kibana (CRITICO, ALTA, etc.).
-        if any(k in severity for k in ("high", "critic", "alta", "alto", "sever", "urgen")):
+        # DDL/DAM habilitan remediacion sin importar severidad (seguridad/SOX).
+        if is_ddl or is_dam or any(k in severity for k in ("high", "critic", "alta", "alto", "sever", "urgen")):
             remediation_clause = (
                 "PASO FINAL — REMEDIACION: Si CONFIRMAS un problema real "
                 "(no falso positivo) y la accion correctiva esta dentro del "
@@ -313,6 +360,11 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"PASO 2 — CORRELACION TOTAL MULTI-FUENTE (OBLIGATORIA): NO te quedes "
             f"con una sola tool. Para determinar la causa raiz REAL debes cruzar "
             f"TODAS las fuentes relevantes y contrastarlas entre si:\n"
+            f"  • Errores conocidos (lookup_kedb): consulta PRIMERO por error_code/"
+            f"regla/categoria — si el error ya esta en la KEDB, aplica la solucion "
+            f"documentada y el playbook sugerido en vez de re-investigar desde cero.\n"
+            f"  • CMDB (lookup_cmdb): identifica el CI afectado (servicio, owner_group, "
+            f"criticidad, dependencias) por el recurso o el modulo TALENTO.\n"
             f"  • Infraestructura (lookup_infrastructure): estado de container/"
             f"AppService, restartCount, CPU/memoria.\n"
             f"  • Base de datos (lookup_sql): databases, performance, deadlocks.\n"
@@ -328,7 +380,7 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"primer dato. Lleva registro mental de QUE fuentes consultaste.\n\n"
             f"PASO 3 — VEREDICTO: determina si la alerta corresponde a un "
             f"problema REAL o es un FALSO POSITIVO. Justifica con los datos.\n\n"
-            f"{remediation_clause}{bruteforce_clause}\n\n"
+            f"{remediation_clause}{bruteforce_clause}{ddl_clause}{dam_clause}\n\n"
             f"PASO FINAL OBLIGATORIO Y AUTOMATICO — report_incident: tu ULTIMA "
             f"accion en CADA alerta DEBE ser llamar a la tool report_incident. "
             f"NO es opcional, NO pidas confirmacion al usuario, NO preguntes "
@@ -342,7 +394,8 @@ def normalize_payload(body: dict) -> Optional[str]:
             f"requiere_remediacion (true solo si hay problema real con accion del "
             f"catalogo), playbook (talento-aci-restart/stop/start, "
             f"talento-appservice-restart, talento-sql-diagnostics-enable, "
-            f"talento-nsg-block-ip; vacio si no aplica). Recien DESPUES de llamar "
+            f"talento-nsg-block-ip, talento-sql-revoke-ddl, talento-sql-disable-login; "
+            f"vacio si no aplica). Recien DESPUES de llamar "
             f"report_incident, escribe tu respuesta final en texto.\n\n"
             f"Responde estructurado: Hallazgo · Causa raiz · Veredicto · Accion propuesta."
         )
