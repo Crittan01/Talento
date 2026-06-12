@@ -15,9 +15,9 @@
   gather_facts: false
 
   vars:
-    tenant_id:       "{{ azure_tenant_id     | default(lookup('env', 'AZURE_TENANT_ID')) }}"
+    tenant_id:       "{{ azure_tenant_id     | default(lookup('env','AZURE_TENANT_ID') or lookup('env','AZURE_TENANT')) }}"
     client_id:       "{{ azure_client_id     | default(lookup('env', 'AZURE_CLIENT_ID')) }}"
-    client_secret:   "{{ azure_client_secret | default(lookup('env', 'AZURE_CLIENT_SECRET')) }}"
+    client_secret:   "{{ azure_client_secret | default(lookup('env','AZURE_CLIENT_SECRET') or lookup('env','AZURE_SECRET')) }}"
     subscription_id: "{{ azure_subscription_id | default(lookup('env', 'AZURE_SUBSCRIPTION_ID')) }}"
     rg_prefix:       "{{ rg_prefix_in | default('rg-central-solucion-talento') }}"
     panel_registro_url:  "{{ panel_url_in | default('http://48.214.147.7:9200/api/registro') }}"
